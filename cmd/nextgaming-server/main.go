@@ -6,7 +6,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -51,7 +50,11 @@ func main() {
 	fs.Usage = usage
 	dataDir := fs.String("data", "", "data folder")
 	noBrowser := fs.Bool("no-browser", false, "do not open the admin panel in a browser")
+	asService := fs.Bool("service", false, "started by the Windows Service Control Manager (set automatically)")
 	fs.Parse(args)
+	if *asService {
+		svcrun.MarkService()
+	}
 	if *dataDir == "" {
 		*dataDir = server.DefaultDataDir()
 	}
@@ -82,7 +85,7 @@ func main() {
 		fmt.Printf("Installed and started the %s service.\n", serviceName)
 		fmt.Printf("Admin panel:  http://localhost:%d\n", protocol.DefaultHTTPPort)
 		fmt.Printf("Club key:     %s   (needed when installing the agent on each gaming PC)\n", cfg.ClubKey)
-		fmt.Println("Allow the ports in Windows Firewall:  scripts\\firewall-server.ps1")
+		fmt.Println("Allow the ports in Windows Firewall:  powershell -ExecutionPolicy Bypass -File firewall-server.ps1")
 	case "uninstall":
 		if err := svcrun.Uninstall(serviceName); err != nil {
 			fatal("%v", err)
@@ -128,11 +131,7 @@ func run(dataDir string, openBrowser bool) int {
 	// Log to the console and to a file (a service has no console).
 	if f, err := os.OpenFile(filepath.Join(dataDir, "server.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
 		defer f.Close()
-		if svcrun.IsService() {
-			log.SetOutput(f)
-		} else {
-			log.SetOutput(io.MultiWriter(os.Stderr, f))
-		}
+		log.SetOutput(svcrun.LogWriter(f))
 	}
 	err := svcrun.Run(serviceName, func(ctx context.Context) error {
 		cfg, err := server.LoadConfig(dataDir)

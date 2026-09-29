@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -55,7 +54,11 @@ func main() {
 	client := fs.String("client", "", "lock screen executable")
 	userClient := fs.Bool("user-client", false, "run the lock screen as the user")
 	fix := fs.Bool("fix", false, "fix Wake-on-LAN settings")
+	asService := fs.Bool("service", false, "started by the Windows Service Control Manager (set automatically)")
 	fs.Parse(args)
+	if *asService {
+		svcrun.MarkService()
+	}
 	if *dataDir == "" {
 		*dataDir = platform.DefaultDataDir()
 	}
@@ -122,11 +125,7 @@ func main() {
 		os.MkdirAll(*dataDir, 0o755)
 		if f, err := os.OpenFile(filepath.Join(*dataDir, "agent.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
 			defer f.Close()
-			if svcrun.IsService() {
-				log.SetOutput(f)
-			} else {
-				log.SetOutput(io.MultiWriter(os.Stderr, f))
-			}
+			log.SetOutput(svcrun.LogWriter(f))
 		}
 		if platform.Simulated {
 			log.Printf("SIMULATION MODE: not on Windows, so no real lock screen, power or Wake-on-LAN control")

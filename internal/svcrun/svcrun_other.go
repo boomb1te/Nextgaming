@@ -9,6 +9,12 @@ import (
 
 var errWindowsOnly = errors.New("installing as a service is only supported on Windows")
 
+// MarkService is a no-op outside Windows.
+func MarkService() {}
+
+// ServiceArg is added to the command line of every installed service.
+const ServiceArg = "-service"
+
 // IsService is always false outside Windows.
 func IsService() bool { return false }
 

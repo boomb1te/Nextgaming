@@ -14,8 +14,22 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
+// serviceFlag is set when the program was started with -service, which the
+// installed service always passes. Detection by parent process alone is not
+// reliable everywhere, so the explicit flag wins.
+var serviceFlag bool
+
+// MarkService tells svcrun that this process was started by the Service Control Manager.
+func MarkService() { serviceFlag = true }
+
+// ServiceArg is added to the command line of every installed service.
+const ServiceArg = "-service"
+
 // IsService reports whether the process was started by the Service Control Manager.
 func IsService() bool {
+	if serviceFlag {
+		return true
+	}
 	ok, err := svc.IsWindowsService()
 	return err == nil && ok
 }
@@ -93,16 +107,29 @@ func Install(spec Spec) error {
 		return fmt.Errorf("connect to service manager (run as Administrator): %w", err)
 	}
 	defer m.Disconnect()
-	if s, err := m.OpenService(spec.Name); err == nil {
-		s.Close()
-		return fmt.Errorf("service %s is already installed", spec.Name)
+	if old, err := m.OpenService(spec.Name); err == nil {
+		// Reinstall: remove the old registration (e.g. from an older version) first.
+		old.Close()
+		if err := removeService(m, spec.Name); err != nil {
+			return fmt.Errorf("remove the old %s service: %w", spec.Name, err)
+		}
 	}
-	s, err := m.CreateService(spec.Name, exe, mgr.Config{
-		DisplayName:      spec.DisplayName,
-		Description:      spec.Description,
-		StartType:        mgr.StartAutomatic,
-		DelayedAutoStart: false,
-	}, spec.Args...)
+	args := append(append([]string{}, spec.Args...), ServiceArg)
+	var s *mgr.Service
+	for i := 0; ; i++ {
+		s, err = m.CreateService(spec.Name, exe, mgr.Config{
+			DisplayName:      spec.DisplayName,
+			Description:      spec.Description,
+			StartType:        mgr.StartAutomatic,
+			DelayedAutoStart: false,
+		}, args...)
+		// Windows finishes deleting the old service asynchronously.
+		if err == windows.ERROR_SERVICE_MARKED_FOR_DELETE && i < 20 {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		break
+	}
 	if err != nil {
 		return err
 	}
@@ -126,6 +153,12 @@ func Uninstall(name string) error {
 		return fmt.Errorf("connect to service manager (run as Administrator): %w", err)
 	}
 	defer m.Disconnect()
+	return removeService(m, name)
+}
+
+// removeService stops a service (killing it if it does not stop, e.g. when it
+// is stuck in "start pending") and deletes it.
+func removeService(m *mgr.Mgr, name string) error {
 	s, err := m.OpenService(name)
 	if err != nil {
 		return fmt.Errorf("service %s is not installed", name)
@@ -133,14 +166,23 @@ func Uninstall(name string) error {
 	defer s.Close()
 	// Clear recovery actions first so Windows does not restart it while we remove it.
 	_ = s.ResetRecoveryActions()
-	if st, err := s.Control(svc.Stop); err == nil {
-		deadline := time.Now().Add(15 * time.Second)
-		for st.State != svc.Stopped && time.Now().Before(deadline) {
-			time.Sleep(300 * time.Millisecond)
-			if st, err = s.Query(); err != nil {
-				break
-			}
+	s.Control(svc.Stop)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, err := s.Query()
+		if err != nil || st.State == svc.Stopped {
+			break
 		}
+		if time.Now().After(deadline) {
+			if st.ProcessId != 0 {
+				if h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, st.ProcessId); err == nil {
+					windows.TerminateProcess(h, 1)
+					windows.CloseHandle(h)
+				}
+			}
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
 	return s.Delete()
 }
