@@ -1,0 +1,6 @@
+dist/
+.dev/
+nextgaming-data/
+nextgaming-agent-data/
+*.exe
+*.log
