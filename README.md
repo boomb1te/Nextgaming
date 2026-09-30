@@ -108,7 +108,13 @@ Give the front-desk PC a fixed IP address in the router (so gaming PCs always fi
 
 ### 3. Wake-on-LAN
 
-Open a PC in the panel → **Check & fix Windows settings** → **Test Wake-on-LAN**.
+**Turn it on in the BIOS first.** On ASUS UEFI boards: Del/F2 at boot → F7 (Advanced Mode) →
+Advanced → APM Configuration → **ErP Ready = Disabled**, **Power On By PCI-E = Enabled** → F10.
+ErP Ready cuts power to the network card when the PC is off; it was what blocked Wake-on-LAN on
+the first club PC. Quick check: after a normal shutdown the Ethernet port light must stay on.
+
+Then open the PC in the panel → **Check & fix Windows settings** → **Test Wake-on-LAN**
+(**Test anyway** if the Windows check still shows problems you have already fixed by hand).
 If the test fails, follow the BIOS steps shown in the panel, then test again.
 The PCs must be on Ethernet and stay plugged in (power strip on) when off.
 
