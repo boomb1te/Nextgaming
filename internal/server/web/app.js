@@ -443,7 +443,7 @@ function wolSection(pc, closeParent) {
       h('ul', { class: 'setlist' }, w.report.settings.map(st =>
         h('li', { class: st.ok ? '' : 'bad' }, `${st.name}: ${st.value}${st.fixed ? ' (fixed)' : ''}`, st.ok || !st.advice ? '' : h('div', { class: 'muted small' }, st.advice))))));
   }
-  if (w.status === 'bios_needed' && w.guide) {
+  if ((w.status === 'bios_needed' || (w.status === 'windows_settings' && w.testedAt && new Date(w.testedAt).getFullYear() > 2000)) && w.guide) {
     kids.push(h('div', { class: 'card', style: 'margin-top:8px;background:#fff7ed;border-color:#fed7aa' },
       h('b', null, `${pc.name}${w.guide.vendor ? ' (' + w.guide.vendor + ')' : ''} can't be turned on remotely.`),
       h('ol', { class: 'steps' }, w.guide.steps.map(s => h('li', null, s))),
@@ -452,11 +452,15 @@ function wolSection(pc, closeParent) {
   const btns = [];
   if (online) {
     btns.push(h('button', { class: 'btn small', onclick: e => act(e.target, () => api('POST', `/api/pcs/${pc.id}/wol-check`, { fix: true }), 'Check finished') }, 'Check & fix Windows settings'));
+    const force = w.status === 'windows_settings';
     btns.push(h('button', { class: 'btn small', disabled: !!pc.session || w.status === 'testing', onclick: async e => {
-      if (!await confirmBox('Test Wake-on-LAN', `${pc.name} will shut down, then NextGaming sends the wake signal and waits for it to start again. This takes 1–4 minutes.`, 'Start test')) return;
-      await act(e.target, () => api('POST', `/api/pcs/${pc.id}/wol-test`), 'Test started — watch the PC tile');
-      closeParent();
-    } }, 'Test Wake-on-LAN'));
+      const extra = force ? ' The Windows check reported problems, so the test may fail — but if the check is wrong, this shows it.' : '';
+      if (!await confirmBox('Test Wake-on-LAN', `${pc.name} will shut down, then NextGaming sends the wake signal and waits for it to start again. This takes 1–4 minutes.${extra}`, 'Start test')) return;
+      try {
+        await act(e.target, () => api('POST', `/api/pcs/${pc.id}/wol-test`, { force }), 'Test started — watch the PC tile');
+        closeParent();
+      } catch (err) { /* shown */ }
+    } }, force ? 'Test anyway' : 'Test Wake-on-LAN'));
   }
   if (btns.length) kids.push(h('div', { class: 'row' }, btns));
   return h('div', null, kids);

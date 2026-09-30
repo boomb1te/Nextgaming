@@ -101,7 +101,7 @@ func (s *Server) BuildSnapshot() (*Snapshot, error) {
 				v.WoL.Report = &rep
 			}
 		}
-		if pc.WoL.Status == core.WoLBIOSNeeded || pc.WoL.Status == core.WoLUntested || pc.WoL.Status == core.WoLFixed {
+		if pc.WoL.Status != core.WoLOK && pc.WoL.Status != core.WoLWiFi {
 			g := bios.For(pc.BoardMaker, pc.BoardProduct)
 			v.WoL.Guide = &g
 		}

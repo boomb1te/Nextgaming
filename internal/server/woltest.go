@@ -112,8 +112,10 @@ func (s *Server) setWoLStage(pcID int64, status, stage, detail string) {
 }
 
 // StartWoLTest shuts a free PC down and tries to wake it with a magic packet.
-// It returns immediately; progress is shown in the admin panel.
-func (s *Server) StartWoLTest(adminID, pcID int64) error {
+// It returns immediately; progress is shown in the admin panel. force=true
+// runs the test even when the Windows check reported problems (the check can
+// be wrong; the real test is the final word).
+func (s *Server) StartWoLTest(adminID, pcID int64, force bool) error {
 	pc, err := store.PCByID(s.st.DB, pcID)
 	if err != nil {
 		return errNotFound("PC")
@@ -131,7 +133,9 @@ func (s *Server) StartWoLTest(adminID, pcID int64) error {
 	case core.WoLWiFi:
 		return errConflict("%s is on Wi-Fi; connect an Ethernet cable first", pc.Name)
 	case core.WoLWindowsSettings:
-		return errConflict("fix the Windows settings first (Check & fix)")
+		if !force {
+			return errConflict("fix the Windows settings first (Check & fix), or use Test anyway")
+		}
 	}
 	s.wolMu.Lock()
 	if s.wolTests[pcID] {
@@ -141,12 +145,12 @@ func (s *Server) StartWoLTest(adminID, pcID int64) error {
 	s.wolTests[pcID] = true
 	s.wolMu.Unlock()
 
-	store.Audit(s.st.DB, adminID, "wol_test", pcID, "")
-	go s.runWoLTest(pc)
+	store.Audit(s.st.DB, adminID, "wol_test", pcID, fmt.Sprintf("force=%v", force))
+	go s.runWoLTest(pc, pc.WoL.Status == core.WoLWindowsSettings)
 	return nil
 }
 
-func (s *Server) runWoLTest(pc core.PC) {
+func (s *Server) runWoLTest(pc core.PC, windowsDoubtful bool) {
 	defer func() {
 		s.wolMu.Lock()
 		delete(s.wolTests, pc.ID)
@@ -196,6 +200,10 @@ func (s *Server) runWoLTest(pc core.PC) {
 			}
 		}
 		time.Sleep(time.Second)
+	}
+	if windowsDoubtful {
+		fail(core.WoLWindowsSettings, "the PC did not turn on. Turn it on by hand, check the Windows settings listed below, then the BIOS steps.")
+		return
 	}
 	fail(core.WoLBIOSNeeded, "the PC did not turn on. Windows settings are correct, so Wake-on-LAN is most likely disabled in the BIOS. Turn the PC on by hand and follow the BIOS steps.")
 }

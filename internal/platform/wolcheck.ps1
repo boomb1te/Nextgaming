@@ -55,62 +55,102 @@ try {
   $name = $adapter.Name
   $restartNeeded = $false
 
-  # 2. Power management: "Wake on Magic Packet".
-  try {
-    $pm = Get-NetAdapterPowerManagement -Name $name
-    $v = "$($pm.WakeOnMagicPacket)"
-    if ($v -eq 'Unsupported') {
-      Add-Setting 'Wake on Magic Packet (power management)' $v $false $false $false 'This network card does not support Wake-on-LAN.'
-    } elseif ($v -ne 'Enabled' -and $fix) {
-      Set-NetAdapterPowerManagement -Name $name -WakeOnMagicPacket Enabled -NoRestart
-      $restartNeeded = $true
-      Add-Setting 'Wake on Magic Packet (power management)' 'Enabled' $true $true $true ''
-    } else {
-      Add-Setting 'Wake on Magic Packet (power management)' $v ($v -eq 'Enabled') $false $true 'Device Manager > network adapter > Power Management.'
-    }
-  } catch {
-    Add-Setting 'Wake on Magic Packet (power management)' 'Unknown' $true $false $false "Could not read: $($_.Exception.Message)"
-  }
-
-  # 3. "Allow this device to wake the computer" (device wake arming).
-  try {
-    $armed = @(powercfg /devicequery wake_armed) | ForEach-Object { "$_".Trim() }
-    $desc = $adapter.InterfaceDescription
-    $isArmed = $armed -contains $desc
-    if (-not $isArmed -and $fix) {
-      powercfg /deviceenablewake "$desc" | Out-Null
-      $armed = @(powercfg /devicequery wake_armed) | ForEach-Object { "$_".Trim() }
-      $isArmed = $armed -contains $desc
-      Add-Setting 'Allow this device to wake the computer' ($(if ($isArmed) { 'Yes' } else { 'No' })) $isArmed $isArmed $true ($(if ($isArmed) { '' } else { 'Device Manager > network adapter > Power Management > tick "Allow this device to wake the computer".' }))
-    } else {
-      Add-Setting 'Allow this device to wake the computer' ($(if ($isArmed) { 'Yes' } else { 'No' })) $isArmed $false $true 'Device Manager > network adapter > Power Management > tick "Allow this device to wake the computer".'
-    }
-  } catch {
-    Add-Setting 'Allow this device to wake the computer' 'Unknown' $true $false $false "Could not read: $($_.Exception.Message)"
-  }
-
-  # 4. Driver advanced properties (names differ between Realtek, Intel, Killer...).
+  # 2. Driver settings (Device Manager > network adapter > Advanced tab).
+  # Matched by registry keyword and checked by registry value, NOT by the
+  # displayed text: display names and values are translated on non-English
+  # Windows/drivers (e.g. "Включено"), keywords and values are not.
+  $wolKeywords = @('*WakeOnMagicPacket', 'S5WakeOnLan', 'EnablePME', 'WakeFromS5', 'WakeOnMagicPacketFromS5')
+  $hasMagicKeyword = $false
   try {
     $props = @(Get-NetAdapterAdvancedProperty -Name $name -ErrorAction SilentlyContinue | Where-Object {
-      $_.DisplayName -match 'Wake on Magic Packet|Shutdown Wake|Wake on LAN|Wake-on-LAN|Wake From Shutdown|Enable PME' -and
-      $_.DisplayName -notmatch 'Pattern|Link|Speed|Flow'
+      ($wolKeywords -contains $_.RegistryKeyword) -or
+      ($_.DisplayName -match 'Wake on Magic Packet|Shutdown Wake|Wake From Shutdown|Enable PME' -and $_.DisplayName -notmatch 'Pattern|Link|Speed|Flow|S0ix')
     })
     foreach ($p in $props) {
-      $cur = "$($p.DisplayValue)"
-      if (Is-On $cur) {
-        Add-Setting "Driver: $($p.DisplayName)" $cur $true $false $true ''
+      if ($p.RegistryKeyword -eq '*WakeOnMagicPacket') { $hasMagicKeyword = $true }
+      $rv = "$(@($p.RegistryValue)[0])"
+      $valid = @($p.ValidRegistryValues | ForEach-Object { "$_" })
+      $isOn = ($rv -eq '1') -or (Is-On "$($p.DisplayValue)")
+      $label = "Driver: $($p.DisplayName)"
+      if ($isOn) {
+        Add-Setting $label "$($p.DisplayValue)" $true $false $true ''
         continue
       }
-      $target = @($p.ValidDisplayValues) | Where-Object { Is-On $_ } | Select-Object -First 1
-      if ($fix -and $target) {
-        Set-NetAdapterAdvancedProperty -Name $name -RegistryKeyword $p.RegistryKeyword -DisplayValue $target -NoRestart
-        $restartNeeded = $true
-        Add-Setting "Driver: $($p.DisplayName)" $target $true $true $true ''
+      $canFix = ($valid.Count -eq 0) -or ($valid -contains '1')
+      if ($fix -and $canFix) {
+        try {
+          Set-NetAdapterAdvancedProperty -Name $name -RegistryKeyword $p.RegistryKeyword -RegistryValue 1 -NoRestart
+          $restartNeeded = $true
+          Add-Setting $label 'Enabled' $true $true $true ''
+        } catch {
+          Add-Setting $label "$($p.DisplayValue)" $false $false $true "Could not change it automatically: $($_.Exception.Message). Set it in Device Manager > network adapter > Advanced tab."
+        }
       } else {
-        Add-Setting "Driver: $($p.DisplayName)" $cur $false $false ([bool]$target) 'Device Manager > network adapter > Advanced tab.'
+        Add-Setting $label "$($p.DisplayValue)" $false $false $canFix 'Device Manager > network adapter > Advanced tab: set it to Enabled.'
       }
     }
   } catch {}
+
+  # 3. Power management "Wake on Magic Packet". This is the same switch as the
+  # *WakeOnMagicPacket driver keyword, so only check it when that keyword is absent.
+  if (-not $hasMagicKeyword) {
+    try {
+      $pm = Get-NetAdapterPowerManagement -Name $name
+      $v = "$($pm.WakeOnMagicPacket)"   # enum name: Enabled / Disabled / Unsupported (never translated)
+      if ($v -eq 'Unsupported') {
+        Add-Setting 'Wake on Magic Packet' $v $false $false $false 'This network card does not support Wake-on-LAN.'
+      } elseif ($v -ne 'Enabled' -and $fix) {
+        Set-NetAdapterPowerManagement -Name $name -WakeOnMagicPacket Enabled -NoRestart
+        $restartNeeded = $true
+        Add-Setting 'Wake on Magic Packet' 'Enabled' $true $true $true ''
+      } else {
+        Add-Setting 'Wake on Magic Packet' $v ($v -eq 'Enabled') $false $true 'Device Manager > network adapter > Advanced tab: Wake on Magic Packet = Enabled.'
+      }
+    } catch {
+      Add-Setting 'Wake on Magic Packet' 'Unknown' $true $false $false "Could not read: $($_.Exception.Message)"
+    }
+  }
+
+  # 4. "Allow this device to wake the computer". Read from WMI by the device's
+  # hardware ID (exact and language independent); powercfg names as a fallback.
+  $wakeAdvice = 'Device Manager > network adapter > Power Management tab: tick "Allow this device to wake the computer".'
+  try {
+    $pnpId = "$($adapter.PnPDeviceID)".ToUpper()
+    $findWake = {
+      @(Get-CimInstance -Namespace root/wmi -ClassName MSPower_DeviceWakeEnable -ErrorAction SilentlyContinue |
+        Where-Object { $pnpId -and "$($_.InstanceName)".ToUpper().StartsWith($pnpId) }) | Select-Object -First 1
+    }
+    $wake = & $findWake
+    $isArmed = $false
+    $known = $false
+    if ($wake) {
+      $known = $true
+      $isArmed = [bool]$wake.Enable
+    } else {
+      $names = @($adapter.InterfaceDescription)
+      try { $names += (Get-PnpDevice -InstanceId $adapter.PnPDeviceID -ErrorAction Stop).FriendlyName } catch {}
+      $armed = @(powercfg /devicequery wake_armed) | ForEach-Object { "$_".Trim() }
+      $isArmed = @($names | Where-Object { $armed -contains $_ }).Count -gt 0
+      $known = $true
+    }
+    $fixedIt = $false
+    if ($known -and -not $isArmed -and $fix) {
+      if ($wake) {
+        try { $wake.Enable = $true; Set-CimInstance -InputObject $wake -ErrorAction Stop } catch {}
+        $w2 = & $findWake
+        if ($w2) { $isArmed = [bool]$w2.Enable }
+      }
+      if (-not $isArmed) {
+        powercfg /deviceenablewake "$($adapter.InterfaceDescription)" 2>$null | Out-Null
+        $armed = @(powercfg /devicequery wake_armed) | ForEach-Object { "$_".Trim() }
+        $isArmed = $armed -contains $adapter.InterfaceDescription
+      }
+      $fixedIt = $isArmed
+    }
+    Add-Setting 'Allow this device to wake the computer' ($(if ($isArmed) { 'Yes' } else { 'No' })) $isArmed $fixedIt $true ($(if ($isArmed) { '' } else { $wakeAdvice }))
+  } catch {
+    Add-Setting 'Allow this device to wake the computer' 'Unknown' $true $false $false "Could not read: $($_.Exception.Message)"
+  }
 
   # 5. Fast Startup (hybrid shutdown) often prevents waking from "Shut down".
   try {

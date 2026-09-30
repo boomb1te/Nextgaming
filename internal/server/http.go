@@ -122,7 +122,9 @@ func (s *Server) routes() http.Handler {
 		return ok(), s.WoLCheck(a.ID, pathID(r), req.Fix)
 	})
 	h("POST /api/pcs/{id}/wol-test", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
-		return ok(), s.StartWoLTest(a.ID, pathID(r))
+		var req struct{ Force bool }
+		decode(r, &req)
+		return ok(), s.StartWoLTest(a.ID, pathID(r), req.Force)
 	})
 	h("POST /api/bulk", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		var req struct{ Action, Text string }
