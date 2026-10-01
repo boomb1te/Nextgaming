@@ -7,7 +7,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,13 +18,15 @@ import (
 	"time"
 	"unsafe"
 
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/mgr"
+
 	"nextgaming/internal/protocol"
 	w "nextgaming/internal/winapi"
 )
 
 const (
 	msgState  = w.WM_APP + 1
-	msgResult = w.WM_APP + 2
 	timerTick = 1
 	timerHide = 2
 )
@@ -39,7 +40,6 @@ var (
 	colWarn    = w.RGB(0xf5, 0x9e, 0x0b)
 	colDanger  = w.RGB(0xef, 0x44, 0x44)
 	colPanel   = w.RGB(0x1b, 0x20, 0x29)
-	colButton  = w.RGB(0x33, 0x3b, 0x4a)
 	colToastBg = w.RGB(0x1e, 0x3a, 0x8a)
 )
 
@@ -69,9 +69,6 @@ type app struct {
 	lastForce    time.Time
 	lockMessage  string
 	lockMsgUntil time.Time
-	btn          w.RECT
-	logoutBusy   bool
-	resultText   string
 }
 
 var theApp *app
@@ -104,9 +101,11 @@ func main() {
 	vw, vh := w.GetSystemMetrics(w.SM_CXVIRTUALSCREEN), w.GetSystemMetrics(w.SM_CYVIRTUALSCREEN)
 	a.lockWnd = w.CreateWindow(w.WS_EX_TOPMOST|w.WS_EX_TOOLWINDOW, "NextGamingLock", "NextGaming", w.WS_POPUP, vx, vy, vw, vh)
 
-	ow, oh := a.px(340), a.px(84)
+	ow, oh := a.px(300), a.px(104)
 	sw := w.GetSystemMetrics(w.SM_CXSCREEN)
-	a.overlayWnd = w.CreateWindow(w.WS_EX_TOPMOST|w.WS_EX_TOOLWINDOW|w.WS_EX_NOACTIVATE|w.WS_EX_LAYERED,
+	// The timer is a normal window (not always-on-top), so games and other
+	// apps cover it. Only short warnings and admin messages pop up on top.
+	a.overlayWnd = w.CreateWindow(w.WS_EX_TOOLWINDOW|w.WS_EX_NOACTIVATE|w.WS_EX_LAYERED,
 		"NextGamingOverlay", "NextGaming timer", w.WS_POPUP, sw-ow-a.px(16), a.px(16), ow, oh)
 	w.SetLayeredAlpha(a.overlayWnd, 235)
 	a.toastWnd = w.CreateWindow(w.WS_EX_TOPMOST|w.WS_EX_TOOLWINDOW|w.WS_EX_NOACTIVATE|w.WS_EX_LAYERED,
@@ -153,7 +152,11 @@ func (a *app) poll() {
 		} else if time.Since(a.lastGood) > 3*time.Second {
 			a.agentOK = false // fail closed
 		}
+		down := !ok && time.Since(a.lastGood) > 5*time.Second
 		a.mu.Unlock()
+		if down {
+			restartAgent()
+		}
 		w.PostMessage(a.lockWnd, msgState, 0, 0)
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -211,7 +214,6 @@ func (a *app) update() {
 		}
 		w.InvalidateRect(a.lockWnd)
 	} else {
-		w.SetWindowPos(a.overlayWnd, w.HWND_TOPMOST, 0, 0, 0, 0, w.SWP_NOMOVE|w.SWP_NOSIZE|w.SWP_NOACTIVATE)
 		w.InvalidateRect(a.overlayWnd)
 	}
 }
@@ -254,40 +256,6 @@ func (a *app) showToast(text string, warn bool, d time.Duration) {
 	w.SetTimer(a.toastWnd, timerHide, uint32(d/time.Millisecond))
 }
 
-// logout asks the agent to end the session (the admin settles payment).
-func (a *app) logout() {
-	if a.logoutBusy || a.locked {
-		return
-	}
-	if w.MessageBox(a.overlayWnd, "End your session now?\n\nThe PC will lock. Please go to the desk to settle payment.",
-		"NextGaming", w.MB_YESNO|w.MB_ICONQUESTION|w.MB_TOPMOST|w.MB_SETFOREGROUND) != w.IDYES {
-		return
-	}
-	a.logoutBusy = true
-	sid := a.st.SessionID
-	go func() {
-		body, _ := json.Marshal(map[string]int64{"sessionId": sid})
-		req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/logout", a.port), bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-NextGaming-Client", "1")
-		text := ""
-		if resp, err := a.client.Do(req); err != nil {
-			text = "Could not end the session. Please ask the administrator."
-		} else {
-			var r struct{ Error string }
-			json.NewDecoder(resp.Body).Decode(&r)
-			resp.Body.Close()
-			if r.Error != "" {
-				text = r.Error
-			}
-		}
-		a.mu.Lock()
-		a.resultText = text
-		a.mu.Unlock()
-		w.PostMessage(a.lockWnd, msgResult, 0, 0)
-	}()
-}
-
 // ---- window procedure ----
 
 func wndProc(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
@@ -295,15 +263,6 @@ func wndProc(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
 	switch msg {
 	case msgState:
 		a.update()
-		return 0
-	case msgResult:
-		a.mu.Lock()
-		text := a.resultText
-		a.mu.Unlock()
-		a.logoutBusy = false
-		if text != "" {
-			a.showToast(text, true, 8*time.Second)
-		}
 		return 0
 	case w.WM_TIMER:
 		if hwnd == a.toastWnd && wp == timerHide {
@@ -334,21 +293,9 @@ func wndProc(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
 		}
 	case w.WM_NCHITTEST:
 		if hwnd == a.overlayWnd {
-			// Let the player drag the timer anywhere, except over the button.
-			x := int32(int16(lp & 0xFFFF))
-			y := int32(int16((lp >> 16) & 0xFFFF))
-			r := overlayScreenRect(hwnd)
-			cx, cy := x-r.Left, y-r.Top
-			if cx >= a.btn.Left && cx <= a.btn.Right && cy >= a.btn.Top && cy <= a.btn.Bottom {
-				return w.HTCLIENT
-			}
-			return w.HTCAPTION
+			return w.HTCAPTION // the player can drag the timer anywhere
 		}
 	case w.WM_LBUTTONUP:
-		if hwnd == a.overlayWnd {
-			a.logout()
-			return 0
-		}
 		if hwnd == a.toastWnd {
 			w.ShowWindow(hwnd, w.SW_HIDE)
 			return 0
@@ -467,29 +414,58 @@ func (a *app) paintOverlay(hwnd uintptr) {
 	p.Fill(w.RECT{Right: p.W, Bottom: p.H}, colPanel)
 	p.Fill(w.RECT{Right: a.px(4), Bottom: p.H}, colAccent)
 	pad := a.px(14)
+	st := a.st
 
-	label, secs := "used", a.st.ElapsedSec
-	timeCol := colText
-	if a.st.Mode == "prepaid" {
-		label, secs = "left", a.st.RemainingSec
+	// Line 1: PC and tariff.
+	title := st.PCName
+	switch {
+	case st.Mode == "free":
+		title += " · Staff"
+	case st.TariffName != "":
+		title += " · " + st.TariffName
+	}
+	if !st.ServerOnline {
+		title += " · offline"
+	}
+	p.Text(title, w.RECT{Left: pad, Top: a.px(8), Right: p.W - pad, Bottom: a.px(28)},
+		w.Font(a.px(14), w.FW_SEMIBOLD), colMuted, w.DT_SINGLELINE|w.DT_END_ELLIPSIS)
+
+	// Line 2: the timer.
+	label, secs, timeCol := "used", st.ElapsedSec, colText
+	if st.Mode == "prepaid" {
+		label, secs = "left", st.RemainingSec
 		if secs < 300 {
 			timeCol = colDanger
 		}
 	}
-	title := a.st.PCName
-	if a.st.Mode == "free" {
-		title += " · staff"
-	}
-	if !a.st.ServerOnline {
-		title += " · offline"
-	}
-	p.Text(title, w.RECT{Left: pad, Top: a.px(8), Right: p.W - a.px(124), Bottom: a.px(30)}, w.Font(a.px(15), w.FW_SEMIBOLD), colMuted, w.DT_SINGLELINE|w.DT_END_ELLIPSIS)
-	p.Text(fmt.Sprintf("%s %s", fmtDur(secs), label), w.RECT{Left: pad, Top: a.px(30), Right: p.W - a.px(124), Bottom: p.H - a.px(6)},
-		w.Font(a.px(30), w.FW_BOLD), timeCol, w.DT_SINGLELINE|w.DT_VCENTER)
+	p.Text(fmt.Sprintf("%s %s", fmtDur(secs), label), w.RECT{Left: pad, Top: a.px(28), Right: p.W - pad, Bottom: a.px(66)},
+		w.Font(a.px(28), w.FW_BOLD), timeCol, w.DT_SINGLELINE|w.DT_VCENTER)
 
-	a.btn = w.RECT{Left: p.W - a.px(118), Top: a.px(24), Right: p.W - a.px(12), Bottom: a.px(62)}
-	p.Fill(a.btn, colButton)
-	p.Text("End session", a.btn, w.Font(a.px(14), w.FW_SEMIBOLD), colText, w.DT_CENTER|w.DT_VCENTER|w.DT_SINGLELINE)
+	// Line 3: rate and cost.
+	info := ""
+	switch st.Mode {
+	case "prepaid":
+		info = fmt.Sprintf("%s/h  ·  Paid %s", fmtMoney(st.RatePerHour, st.Currency), fmtMoney(st.Cost, st.Currency))
+	case "open":
+		info = fmt.Sprintf("%s/h  ·  Cost now %s", fmtMoney(st.RatePerHour, st.Currency), fmtMoney(st.Cost, st.Currency))
+	case "free":
+		info = "Not billed"
+	}
+	p.Text(info, w.RECT{Left: pad, Top: a.px(68), Right: p.W - pad, Bottom: p.H - a.px(8)},
+		w.Font(a.px(15), w.FW_NORMAL), colText, w.DT_SINGLELINE|w.DT_END_ELLIPSIS)
+}
+
+// fmtMoney renders minor units as "12.50 TMT".
+func fmtMoney(v int64, currency string) string {
+	sign := ""
+	if v < 0 {
+		sign, v = "-", -v
+	}
+	s := fmt.Sprintf("%s%d.%02d", sign, v/100, v%100)
+	if currency != "" {
+		s += " " + currency
+	}
+	return s
 }
 
 func (a *app) paintToast(hwnd uintptr) {
@@ -510,3 +486,30 @@ func fmtDur(sec int64) string {
 	}
 	return fmt.Sprintf("%d:%02d:%02d", sec/3600, (sec%3600)/60, sec%60)
 }
+
+var lastAgentStart time.Time
+
+// restartAgent starts the agent service if someone stopped it. The lock
+// screen runs as SYSTEM, so it may do this; the agent in turn restarts the
+// lock screen. Each one watches the other.
+func restartAgent() {
+	if time.Since(lastAgentStart) < 5*time.Second {
+		return
+	}
+	lastAgentStart = time.Now()
+	m, err := mgr.Connect()
+	if err != nil {
+		return // not allowed (lock screen running as a normal user)
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(agentService)
+	if err != nil {
+		return
+	}
+	defer s.Close()
+	if st, err := s.Query(); err == nil && st.State == svc.Stopped {
+		s.Start()
+	}
+}
+
+const agentService = "NextGamingAgent"

@@ -145,6 +145,11 @@ func (h *Hub) serve(ctx context.Context, raw net.Conn) {
 	}
 
 	pc, err := h.srv.registerAgent(hello, ip)
+	if errors.Is(err, errRemoved) {
+		log.Printf("agents: %s (%s) was removed in the admin panel; telling its agent to uninstall", hello.Hostname, ip)
+		conn.Send(protocol.TypeReject, "", protocol.Reject{Reason: protocol.RejectRemoved})
+		return
+	}
 	if err != nil {
 		log.Printf("agents: register %s: %v", ip, err)
 		conn.Send(protocol.TypeReject, "", protocol.Reject{Reason: "server error"})

@@ -585,10 +585,11 @@ func (s *Server) UpdatePC(adminID, pcID int64, name string, zoneID int64, sortOr
 	return err
 }
 
-// DeletePC removes a PC from the list (history is kept).
+// DeletePC removes a PC from the list (history is kept). If the PC is online,
+// its agent is told to uninstall itself, so the PC is free to use and does
+// not register again. Reinstalling the agent later brings the PC back.
 func (s *Server) DeletePC(adminID, pcID int64) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	err := s.st.Tx(func(q store.Q) error {
 		if open, err := store.OpenSessionForPC(q, pcID); err != nil {
 			return err
@@ -600,11 +601,16 @@ func (s *Server) DeletePC(adminID, pcID int64) error {
 		}
 		return store.Audit(q, adminID, "pc_delete", pcID, "")
 	})
-	if err == nil {
-		s.hub.Disconnect(pcID)
-		s.changed()
+	s.mu.Unlock()
+	if err != nil {
+		return err
 	}
-	return err
+	if s.hub.Online(pcID) {
+		s.hub.Command(pcID, protocol.TypeUninstall, nil, 5*time.Second)
+	}
+	s.hub.Disconnect(pcID)
+	s.changed()
+	return nil
 }
 
 // SaveZone creates or updates a zone.

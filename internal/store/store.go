@@ -199,6 +199,16 @@ func (s *Store) migrate() error {
 		if _, err := s.DB.Exec("PRAGMA user_version = 1"); err != nil {
 			return err
 		}
+		v = 1
+	}
+	if v < 2 {
+		// v2: remember when a PC was removed, so only a reinstalled agent can bring it back.
+		if _, err := s.DB.Exec("ALTER TABLE pcs ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+		if _, err := s.DB.Exec("PRAGMA user_version = 2"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -565,28 +575,58 @@ func PCByID(q Q, id int64) (core.PC, error) {
 	return p, err
 }
 
-// PCByMachineID finds a PC by the agent's stable machine ID (including deleted ones).
-func PCByMachineID(q Q, machineID string) (core.PC, bool, error) {
+// FoundPC is a PC looked up by identity, including removed ones.
+type FoundPC struct {
+	core.PC
+	Deleted   bool
+	DeletedAt time.Time
+}
+
+func findPC(q Q, where string, args ...any) (*FoundPC, error) {
 	var deleted int
-	row := q.QueryRow("SELECT "+pcCols+",deleted FROM pcs WHERE machine_id=?", machineID)
+	var deletedAt int64
 	var p core.PC
 	var checked, tested, created int64
-	err := row.Scan(&p.ID, &p.Name, &p.ZoneID, &p.SortOrder, &p.MachineID, &p.MAC, &p.IP, &p.Hostname,
-		&p.BoardMaker, &p.BoardProduct, &p.AgentVersion, &p.WoL.Status, &p.WoL.Detail, &checked, &tested, &p.WoL.Report, &created, &deleted)
+	err := q.QueryRow("SELECT "+pcCols+",deleted,deleted_at FROM pcs WHERE "+where+" ORDER BY deleted, id DESC LIMIT 1", args...).Scan(
+		&p.ID, &p.Name, &p.ZoneID, &p.SortOrder, &p.MachineID, &p.MAC, &p.IP, &p.Hostname,
+		&p.BoardMaker, &p.BoardProduct, &p.AgentVersion, &p.WoL.Status, &p.WoL.Detail, &checked, &tested, &p.WoL.Report, &created,
+		&deleted, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return p, false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return p, false, err
+		return nil, err
 	}
 	p.WoL.CheckedAt, p.WoL.TestedAt, p.CreatedAt = fromTS(checked), fromTS(tested), fromTS(created)
-	if deleted == 1 {
-		// A deleted PC that reconnects comes back.
-		if _, err := q.Exec("UPDATE pcs SET deleted=0 WHERE id=?", p.ID); err != nil {
-			return p, false, err
-		}
+	return &FoundPC{PC: p, Deleted: deleted == 1, DeletedAt: fromTS(deletedAt)}, nil
+}
+
+// PCByMachineID finds a PC by the agent's machine ID (including removed ones).
+func PCByMachineID(q Q, machineID string) (*FoundPC, error) {
+	return findPC(q, "machine_id=?", machineID)
+}
+
+// PCByMAC finds a PC by its network card address (including removed ones).
+func PCByMAC(q Q, mac string) (*FoundPC, error) {
+	if mac == "" {
+		return nil, nil
 	}
-	return p, true, nil
+	return findPC(q, "mac=? COLLATE NOCASE", mac)
+}
+
+// UndeletePC brings a removed PC back.
+func UndeletePC(q Q, id int64) error {
+	_, err := q.Exec("UPDATE pcs SET deleted=0, deleted_at=0 WHERE id=?", id)
+	return err
+}
+
+// SetPCMachineID re-links a PC to a new agent identity.
+func SetPCMachineID(q Q, id int64, machineID string) error {
+	if _, err := q.Exec("UPDATE pcs SET machine_id=machine_id||'-old-'||id WHERE machine_id=? AND id!=?", machineID, id); err != nil {
+		return err
+	}
+	_, err := q.Exec("UPDATE pcs SET machine_id=? WHERE id=?", machineID, id)
+	return err
 }
 
 // CreatePC registers a new PC.
@@ -625,7 +665,7 @@ func UpdatePCWoL(q Q, id int64, w core.WoLInfo) error {
 
 // DeletePC hides a PC (history stays intact).
 func DeletePC(q Q, id int64) error {
-	_, err := q.Exec("UPDATE pcs SET deleted=1 WHERE id=?", id)
+	_, err := q.Exec("UPDATE pcs SET deleted=1, deleted_at=? WHERE id=?", time.Now().Unix(), id)
 	return err
 }
 

@@ -37,6 +37,7 @@ func GetInventory(dataDir string) Inventory {
 		mac = nics[0].MAC
 	}
 	inv.MachineID = makeMachineID(inv.Hostname, mac)
+	inv.IDMAC = mac
 	return inv
 }
 
@@ -127,4 +128,10 @@ func (l *procLauncher) Stop() {
 	if l.cmd != nil && l.cmd.Process != nil {
 		l.cmd.Process.Kill()
 	}
+}
+
+// SelfUninstall stops a simulated agent (there is no service to remove).
+func SelfUninstall() {
+	log.Printf("SIMULATION: removed from the admin panel; exiting")
+	go func() { os.Exit(0) }()
 }

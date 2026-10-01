@@ -15,11 +15,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"nextgaming/internal/core"
 	"nextgaming/internal/platform"
 	"nextgaming/internal/protocol"
+	"nextgaming/internal/svcrun"
 )
 
 // Version of the agent.
@@ -38,6 +41,9 @@ type Config struct {
 	LocalPort int `json:"localPort"`
 	// MachineID overrides the hardware-derived ID (simulation and tests only).
 	MachineID string `json:"machineId,omitempty"`
+	// InstalledAt is set by "install". A PC removed in the admin panel only
+	// comes back if the agent was installed again after the removal.
+	InstalledAt time.Time `json:"installedAt"`
 
 	dataDir string
 }
@@ -100,6 +106,16 @@ type localState struct {
 	PCName      string    `json:"pcName"`
 	ClubName    string    `json:"clubName"`
 	WarnMinutes []int     `json:"warnMinutes"`
+	// Pricing for the player's timer.
+	TariffName       string `json:"tariffName"`
+	RatePerHour      int64  `json:"ratePerHour"`
+	Paid             int64  `json:"paid"`
+	Currency         string `json:"currency"`
+	GraceSeconds     int    `json:"graceSeconds"`
+	MinChargeMinutes int    `json:"minChargeMinutes"`
+	// WasStopped is set when someone stopped the agent service; it is reported
+	// to the server (and cleared) on the next connection.
+	WasStopped bool `json:"wasStopped,omitempty"`
 }
 
 // Agent is the running agent.
@@ -158,6 +174,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.cfg.MachineID != "" {
 		a.inv.MachineID = a.cfg.MachineID
 		a.inv.Hostname = a.inv.Hostname + "-" + a.cfg.MachineID
+	} else {
+		a.inv.MachineID = a.stableID(a.inv)
 	}
 	log.Printf("agent %s: machine %s (%s), board %s %s", Version, a.inv.MachineID, a.inv.Hostname, a.inv.BoardMaker, a.inv.BoardProduct)
 
@@ -179,7 +197,49 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.watchdog(ctx)
 	go a.tick(ctx)
 	a.connectLoop(ctx)
+	if svcrun.StopRequested() {
+		a.mu.Lock()
+		a.st.WasStopped = true
+		a.saveStateLocked()
+		a.mu.Unlock()
+	}
 	return nil
+}
+
+// SelfUninstall removes this agent from the PC. A variable so tests can replace it.
+var SelfUninstall = platform.SelfUninstall
+
+// identity is the machine ID saved on first run.
+type identity struct {
+	MachineID string `json:"machineId"`
+	MAC       string `json:"mac"`
+}
+
+// stableID keeps the PC's identity the same across reboots, even if during
+// boot the network card is not ready yet or a VPN adapter appears. The saved
+// ID is dropped only when its network card is gone (e.g. the disk was cloned
+// into another PC), so cloned PCs still get their own IDs.
+func (a *Agent) stableID(inv platform.Inventory) string {
+	path := filepath.Join(a.cfg.dataDir, "identity.json")
+	var saved identity
+	if b, err := os.ReadFile(path); err == nil && json.Unmarshal(b, &saved) == nil && saved.MachineID != "" {
+		present := len(inv.NICs) == 0 // nothing detected yet: trust the saved ID
+		for _, n := range inv.NICs {
+			if strings.EqualFold(n.MAC, saved.MAC) {
+				present = true
+			}
+		}
+		if present || saved.MAC == "" {
+			return saved.MachineID
+		}
+		log.Printf("identity: network card %s is gone; this looks like a different PC, using a new ID", saved.MAC)
+	}
+	if inv.MachineID != "" && inv.IDMAC != "" {
+		b, _ := json.Marshal(identity{MachineID: inv.MachineID, MAC: inv.IDMAC})
+		os.MkdirAll(a.cfg.dataDir, 0o755)
+		writeAtomic(path, b)
+	}
+	return inv.MachineID
 }
 
 // watchdog keeps the lock screen alive and reports if it was killed.
@@ -273,6 +333,7 @@ func (a *Agent) session(ctx context.Context) error {
 		Hostname: a.inv.Hostname, AgentVersion: Version, NICs: platform.NICs(),
 		BoardMaker: a.inv.BoardMaker, BoardProduct: a.inv.BoardProduct,
 		Locked: a.st.Locked, SessionID: a.st.SessionID,
+		InstalledAt: a.cfg.InstalledAt,
 	}
 	a.mu.Unlock()
 	if err := conn.Send(protocol.TypeHello, "", hello); err != nil {
@@ -286,6 +347,12 @@ func (a *Agent) session(ctx context.Context) error {
 	switch env.Type {
 	case protocol.TypeReject:
 		rej, _ := protocol.Decode[protocol.Reject](env)
+		if rej.Reason == protocol.RejectRemoved {
+			log.Printf("this PC was removed in the admin panel; uninstalling NextGaming")
+			SelfUninstall()
+			<-ctx.Done()
+			return ctx.Err()
+		}
 		time.Sleep(20 * time.Second) // a wrong key will not fix itself quickly
 		return fmt.Errorf("server refused connection: %s", rej.Reason)
 	case protocol.TypeWelcome:
@@ -298,7 +365,15 @@ func (a *Agent) session(ctx context.Context) error {
 	a.mu.Lock()
 	a.conn, a.online, a.autoFix = conn, true, w.AutoFixWoL
 	a.st.PCName, a.st.ClubName = w.PCName, w.ClubName
+	wasStopped := a.st.WasStopped
+	if wasStopped {
+		a.st.WasStopped = false
+		a.saveStateLocked()
+	}
 	a.mu.Unlock()
+	if wasStopped {
+		conn.Send(protocol.TypeEvent, "", protocol.Event{Kind: protocol.EventAgentStopped})
+	}
 	defer func() {
 		a.mu.Lock()
 		a.conn, a.online = nil, false
@@ -373,6 +448,11 @@ func (a *Agent) handle(conn *protocol.Conn, env protocol.Envelope) {
 		if err := platform.Shutdown(env.Type == protocol.TypeRestart); err != nil {
 			log.Printf("power command failed: %v", err)
 		}
+	case protocol.TypeUninstall:
+		ack(nil)
+		log.Printf("this PC was removed in the admin panel; uninstalling NextGaming")
+		time.Sleep(300 * time.Millisecond)
+		SelfUninstall()
 	case protocol.TypeWoLCheck:
 		chk, _ := protocol.Decode[protocol.WoLCheck](env)
 		go a.reportWoL(conn, env.ID, chk.Fix)
@@ -406,6 +486,8 @@ func (a *Agent) apply(ds protocol.DesiredState) {
 	a.st.SessionID = ds.SessionID
 	a.st.Mode = ds.Mode
 	a.st.PCName, a.st.ClubName, a.st.WarnMinutes = ds.PCName, ds.ClubName, ds.WarnMinutes
+	a.st.TariffName, a.st.RatePerHour, a.st.Paid, a.st.Currency = ds.TariffName, ds.RatePerHour, ds.Paid, ds.Currency
+	a.st.GraceSeconds, a.st.MinChargeMinutes = ds.GraceSeconds, ds.MinChargeMinutes
 	a.st.Deadline, a.st.CountFrom = time.Time{}, time.Time{}
 	if !ds.Locked {
 		if ds.Mode == "prepaid" {
@@ -455,12 +537,19 @@ func (a *Agent) ClientState() protocol.ClientState {
 	if cs.PCName == "" {
 		cs.PCName = a.inv.Hostname
 	}
+	cs.TariffName, cs.RatePerHour, cs.Currency = a.st.TariffName, a.st.RatePerHour, a.st.Currency
 	if !a.st.Locked {
 		if a.st.Mode == "prepaid" {
 			cs.RemainingSec = a.remainingLocked()
 		} else if !a.st.CountFrom.IsZero() {
 			cs.ElapsedSec = int64(a.now().Sub(a.st.CountFrom) / time.Second)
 		}
+	}
+	switch a.st.Mode {
+	case "prepaid":
+		cs.Cost = a.st.Paid
+	case "open":
+		cs.Cost = int64(core.OpenCharge(core.Money(a.st.RatePerHour), cs.ElapsedSec, a.st.GraceSeconds, a.st.MinChargeMinutes))
 	}
 	return cs
 }

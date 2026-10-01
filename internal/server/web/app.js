@@ -6,6 +6,7 @@
 const S = {
   me: null, snap: null, snapAt: 0, tab: 'pcs', live: false, es: null,
   seenAlert: -1, reportDate: todayISO(), auditDate: todayISO(),
+  selecting: false, selected: new Set(),
 };
 
 // ---------- helpers ----------
@@ -324,27 +325,91 @@ function tileSub(pc) {
 function renderPCs() {
   const snap = S.snap;
   const pcs = snap.pcs;
+  // Drop selections for PCs that no longer exist.
+  for (const id of [...S.selected]) if (!pcs.find(p => p.id === id)) S.selected.delete(id);
   const counts = pcs.reduce((c, p) => (c[p.state] = (c[p.state] || 0) + 1, c), {});
+
+  const selectBtn = h('button', { class: 'btn' + (S.selecting ? ' primary' : ''), onclick: () => {
+    S.selecting = !S.selecting; if (!S.selecting) S.selected.clear(); rerenderPCs();
+  } }, S.selecting ? 'Done selecting' : 'Select');
+
   const toolbar = h('div', { class: 'toolbar' },
+    selectBtn,
     h('button', { class: 'btn', onclick: e => bulk(e.target, 'wake') }, 'Wake all offline PCs'),
     h('button', { class: 'btn', onclick: e => bulk(e.target, 'shutdown_free') }, 'Shut down free PCs'),
     h('button', { class: 'btn', onclick: () => messageModal(null) }, 'Message all'),
     h('div', { class: 'legend' }, Object.entries(STATE_LABEL).map(([k, v]) =>
       h('span', null, h('i', { class: 'st-' + k, style: `background:var(--${{ free: 'green', busy: 'blue', paused: 'amber', checkout: 'red', staff: 'purple', offline: 'gray' }[k]})` }), `${v} ${counts[k] || 0}`))));
+
   if (!pcs.length) {
     return h('div', null, toolbar, h('div', { class: 'card' },
       h('h2', null, 'No PCs yet'),
       h('p', null, 'Install the NextGaming agent on each gaming PC. They appear here automatically as soon as they connect.'),
       isOwner() ? h('button', { class: 'btn primary', onclick: () => { S.tab = 'settings'; renderTabs(); rerender(); } }, 'Show install instructions') : null));
   }
-  return h('div', null, toolbar, h('div', { class: 'grid' }, pcs.map(pc =>
-    h('div', { class: 'tile st-' + pc.state, onclick: () => pcModal(pc.id) },
+
+  const grid = h('div', { class: 'grid' }, pcs.map(pc => {
+    const on = S.selected.has(pc.id);
+    return h('div', { class: 'tile st-' + pc.state + (S.selecting && on ? ' selected' : ''), onclick: () => {
+      if (S.selecting) { on ? S.selected.delete(pc.id) : S.selected.add(pc.id); rerenderPCs(); }
+      else pcModal(pc.id);
+    } },
+      S.selecting ? h('div', { class: 'tickbox' }, on ? '✓' : '') : null,
       h('div', { class: 'name' }, pc.name, wolBadge(pc)),
       h('div', { class: 'state' }, STATE_LABEL[pc.state] || pc.state),
       tileTimer(pc),
       h('div', { class: 'sub' }, tileSub(pc)),
       pc.runtime.online && !pc.runtime.clientAlive ? h('div', { class: 'warn' }, 'Lock screen not running') : null,
-      !pc.runtime.online && pc.session ? h('div', { class: 'warn' }, 'Offline during session') : null))));
+      !pc.runtime.online && pc.session ? h('div', { class: 'warn' }, 'Offline during session') : null);
+  }));
+
+  return h('div', null, toolbar, S.selecting ? selectionBar(pcs) : null, grid);
+}
+
+// Re-render just the PCs tab (selection changes shouldn't wait for a snapshot).
+function rerenderPCs() {
+  const main = document.getElementById('main');
+  if (main && S.tab === 'pcs') main.replaceChildren(renderPCs());
+}
+
+function selectionBar(pcs) {
+  const chosen = () => pcs.filter(p => S.selected.has(p.id));
+  const n = S.selected.size;
+  const freeOnline = chosen().filter(p => p.state === 'free');
+  const onlineSel = chosen().filter(p => p.runtime.online);
+  const offlineSel = chosen().filter(p => !p.runtime.online);
+  const withSession = chosen().filter(p => p.session);
+
+  const bar = h('div', { class: 'card selbar' },
+    h('div', { class: 'row' },
+      h('b', null, `${n} selected`),
+      h('button', { class: 'btn small', onclick: () => { pcs.forEach(p => S.selected.add(p.id)); rerenderPCs(); } }, 'Select all'),
+      h('button', { class: 'btn small', onclick: () => { S.selected.clear(); rerenderPCs(); } }, 'Clear')));
+  if (n === 0) { bar.append(h('p', { class: 'muted small' }, 'Tap PCs to select them.')); return bar; }
+
+  const actions = h('div', { class: 'row', style: 'margin-top:8px' },
+    h('button', { class: 'btn primary', disabled: !freeOnline.length, onclick: () => startManyModal(freeOnline.map(p => p.id)) }, `Start session (${freeOnline.length} free)`),
+    h('button', { class: 'btn', disabled: !onlineSel.length, onclick: () => messageManyModal(onlineSel.map(p => p.id)) }, 'Message'),
+    h('button', { class: 'btn', disabled: !onlineSel.length, onclick: e => runMany(e.target, 'Lock', onlineSel, p => api('POST', `/api/pcs/${p.id}/lock`)) }, 'Lock'),
+    h('button', { class: 'btn', disabled: !offlineSel.length, onclick: e => runMany(e.target, 'Wake', offlineSel, p => api('POST', `/api/pcs/${p.id}/wake`)) }, 'Wake'),
+    h('button', { class: 'btn danger', disabled: !onlineSel.length, onclick: async e => {
+      if (!await confirmBox('Shut down', `Shut down ${onlineSel.length} PC(s)? Any paid session is left running on the server.`, 'Shut down', true)) return;
+      runMany(e.target, 'Shut down', onlineSel, p => api('POST', `/api/pcs/${p.id}/power`, { action: 'shutdown', force: true }));
+    } }, 'Shut down'));
+  bar.append(actions);
+  if (withSession.length) bar.append(h('p', { class: 'muted small' }, `${withSession.length} selected PC(s) have a session — "Start session" skips them.`));
+  return bar;
+}
+
+// runMany applies fn to each PC and reports how it went.
+async function runMany(btn, label, list, fn) {
+  btn.disabled = true;
+  const done = [], failed = [];
+  for (const p of list) {
+    try { await fn(p); done.push(p.name); } catch (e) { failed.push(`${p.name} (${e.message})`); }
+  }
+  btn.disabled = false;
+  toast(`${label}: ${done.length} done` + (failed.length ? `, ${failed.length} failed — ${failed.join('; ')}` : ''), failed.length ? 'warn' : 'ok');
 }
 
 async function bulk(btn, action) {
@@ -536,6 +601,56 @@ function startModal(id) {
     try { await act(startBtn, () => api('POST', `/api/pcs/${pc.id}/start`, body), `${pc.name} started`); m.close(); } catch (e) { /* shown */ }
   };
   draw();
+}
+
+function startManyModal(ids) {
+  if (!ids.length) { toast('No free, online PC selected.', 'warn'); return; }
+  // Use the first PC's zone rate for the preview; each PC is billed at its own zone rate.
+  const first = pcById(ids[0]);
+  const rate = (zoneById(first.zoneId) || {}).hourlyRate || 0;
+  const zonesInSel = new Set(ids.map(i => (pcById(i) || {}).zoneId));
+  let mode = 'prepaid', choice = null;
+  const priceEl = h('div', { class: 'price' });
+  const pickerBox = h('div');
+  const startBtn = h('button', { class: 'btn primary' }, 'Start');
+  const modeBtns = [['prepaid', 'Prepaid (fixed time)'], ['open', 'Open (pay at the end)']].map(([k, l]) =>
+    h('button', { type: 'button', class: 'btn', onclick: () => { mode = k; draw(); } }, l));
+  function draw() {
+    modeBtns.forEach((b, i) => b.classList.toggle('primary', ['prepaid', 'open'][i] === mode));
+    if (mode === 'prepaid') {
+      pickerBox.replaceChildren(tariffPicker(first, rate, c => { choice = c; priceEl.textContent = `${mins(c.minutesTotal)} on each PC`; startBtn.textContent = `Start on ${ids.length} PC(s)`; }));
+    } else {
+      choice = null;
+      pickerBox.replaceChildren(h('p', null, `Each PC counts up and is paid at the end at its own hourly rate.`));
+      priceEl.textContent = '';
+      startBtn.textContent = `Start open on ${ids.length} PC(s)`;
+    }
+  }
+  const m = modal(`Start session on ${ids.length} PCs`, h('div', null,
+    zonesInSel.size > 1 ? h('p', { class: 'muted small' }, 'Selected PCs are in different zones; each is billed at its own zone rate. A package applies only to PCs in its zone.') : null,
+    h('div', { class: 'row', style: 'margin-bottom:10px' }, modeBtns), pickerBox, priceEl),
+  [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), startBtn]);
+  startBtn.onclick = async () => {
+    const body = { mode };
+    if (mode === 'prepaid') {
+      if (!choice || (!choice.packageId && !(choice.minutes > 0))) { toast('Choose a package or enter minutes.', 'error'); return; }
+      body.packageId = choice.packageId; body.minutes = choice.minutes;
+    }
+    await runMany(startBtn, 'Start', ids.map(pcById), p => api('POST', `/api/pcs/${p.id}/start`, body));
+    m.close();
+  };
+  draw();
+}
+
+function messageManyModal(ids) {
+  const text = h('textarea', { rows: 3, maxlength: 500, placeholder: 'e.g. 10 minutes until closing' });
+  const btn = h('button', { class: 'btn primary' }, 'Send');
+  const m = modal(`Message ${ids.length} PCs`, field('Text shown on screen', text), [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), btn]);
+  btn.onclick = async () => {
+    if (!text.value.trim()) { toast('Message is empty.', 'error'); return; }
+    await runMany(btn, 'Message', ids.map(pcById), p => api('POST', `/api/pcs/${p.id}/message`, { text: text.value }));
+    m.close();
+  };
 }
 
 function timeModal(id) {
@@ -756,8 +871,45 @@ function renderSettings() {
   const wrap = h('div');
   wrap.append(accountCard());
   if (!isOwner()) return wrap;
-  wrap.append(clubCard(), installCard(), zonesCard(), packagesCard(), pcsCard(), staffCard());
+  wrap.append(clubCard(), dataCard(), installCard(), zonesCard(), packagesCard(), pcsCard(), staffCard());
   return wrap;
+}
+
+function dataCard() {
+  const today = todayISO();
+  const from = h('input', { type: 'date', value: today });
+  const to = h('input', { type: 'date', value: today });
+  const dl = (path) => { window.location.href = path; };
+  const importFile = h('input', { type: 'file', accept: '.db' });
+  const importMsg = h('div', { class: 'small', style: 'margin-top:6px' });
+  const importBtn = h('button', { class: 'btn' }, 'Upload & restore');
+  importBtn.onclick = async () => {
+    const f = importFile.files[0];
+    if (!f) { toast('Choose a .db file first.', 'error'); return; }
+    if (!await confirmBox('Restore database', 'This replaces ALL current data when the server restarts. The current data is kept as a .replaced copy. Continue?', 'Upload', true)) return;
+    const fd = new FormData(); fd.append('file', f);
+    importBtn.disabled = true;
+    try {
+      const res = await fetch('/api/import/db', { method: 'POST', headers: { 'X-NextGaming': '1' }, credentials: 'same-origin', body: fd });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error || 'Upload failed');
+      importMsg.textContent = d.message || 'Uploaded. Restart the server to apply.';
+      importMsg.style.color = 'var(--green)';
+      toast('Uploaded. Restart the server to apply.', 'ok');
+    } catch (e) { importMsg.textContent = e.message; importMsg.style.color = 'var(--red)'; }
+    finally { importBtn.disabled = false; }
+  };
+  return h('div', { class: 'card' }, h('h2', null, 'Data: backup, export, import'),
+    h('h3', null, 'Full backup'),
+    h('p', { class: 'muted small' }, 'Downloads the whole database (all history and settings). Keep a copy off this PC.'),
+    h('button', { class: 'btn primary', onclick: () => dl('/api/export/db') }, 'Download database'),
+    h('h3', null, 'Export to Excel (CSV)'),
+    h('div', { class: 'row' }, field('From', from), field('To', to),
+      h('button', { class: 'btn', onclick: () => dl(`/api/export/payments.csv?from=${from.value}&to=${to.value}`) }, 'Payments CSV'),
+      h('button', { class: 'btn', onclick: () => dl(`/api/export/sessions.csv?from=${from.value}&to=${to.value}`) }, 'Sessions CSV')),
+    h('h3', null, 'Restore from a backup'),
+    h('p', { class: 'muted small' }, 'Replaces all current data with an uploaded database file. Takes effect after the server restarts.'),
+    h('div', { class: 'row' }, importFile, importBtn), importMsg);
 }
 
 function accountCard() {

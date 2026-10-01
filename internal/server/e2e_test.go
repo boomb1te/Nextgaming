@@ -146,6 +146,7 @@ func setup(t *testing.T, nAgents int) *env {
 		ac.MachineID = fmt.Sprintf("test-pc-%d", i+1)
 		ac.LocalPort = freePort(t)
 		ac.ClientPath = "/nonexistent"
+		ac.InstalledAt = time.Now()
 		a := agent.New(ac)
 		e.agents = append(e.agents, a)
 		e.ports = append(e.ports, ac.LocalPort)
@@ -339,4 +340,86 @@ func TestWrongClubKeyIsRejected(t *testing.T) {
 	if err != nil || env.Type != protocol.TypeReject {
 		t.Fatalf("got %v %v, want reject", env.Type, err)
 	}
+}
+
+// startAgent runs one in-process agent with its own lifetime.
+func startAgent(t *testing.T, e *env, machineID string, installedAt time.Time) (context.CancelFunc, int) {
+	t.Helper()
+	ac, _ := agent.LoadConfig(t.TempDir())
+	ac.Server = e.s.cfg.AgentAddr
+	ac.ClubKey = e.s.cfg.ClubKey
+	ac.MachineID = machineID
+	ac.LocalPort = freePort(t)
+	ac.ClientPath = "/nonexistent"
+	ac.InstalledAt = installedAt
+	ctx, cancel := context.WithCancel(context.Background())
+	go agent.New(ac).Run(ctx)
+	t.Cleanup(cancel)
+	return cancel, ac.LocalPort
+}
+
+func onlineCount(e *env) int {
+	n := 0
+	for _, p := range e.snapshot().PCs {
+		if p.Runtime.Online {
+			n++
+		}
+	}
+	return n
+}
+
+// Removing a PC uninstalls its agent and keeps it removed; reinstalling brings it back.
+func TestRemovePCStaysRemoved(t *testing.T) {
+	var uninstalls atomic.Int32
+	agent.SelfUninstall = func() { uninstalls.Add(1) }
+
+	e := setup(t, 0)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	stop, _ := startAgent(t, e, "remove-me", time.Now().Add(-time.Hour))
+	eventually(t, "PC online", func() bool { return onlineCount(e) == 1 })
+	pc := e.pc("PC 1")
+
+	e.must("DELETE", fmt.Sprintf("/api/pcs/%d", pc.ID), nil, nil)
+	eventually(t, "agent told to uninstall", func() bool { return uninstalls.Load() >= 1 })
+	// The (simulated) agent keeps trying to reconnect; it must be refused.
+	time.Sleep(2500 * time.Millisecond)
+	if n := len(e.snapshot().PCs); n != 0 {
+		t.Fatalf("removed PC came back: %d PCs listed", n)
+	}
+	stop()
+
+	// Installing the agent again after the removal brings the same PC back.
+	time.Sleep(1100 * time.Millisecond) // removal times have 1 s resolution
+	startAgent(t, e, "remove-me", time.Now())
+	eventually(t, "reinstalled PC back", func() bool { return len(e.snapshot().PCs) == 1 && onlineCount(e) == 1 })
+	if got := e.snapshot().PCs[0]; got.ID != pc.ID || got.Name != "PC 1" {
+		t.Fatalf("reinstalled PC = %d %q, want %d PC 1", got.ID, got.Name, pc.ID)
+	}
+}
+
+// A PC whose agent ID changed (e.g. after an update) is matched by its MAC,
+// so no duplicate tile appears.
+func TestChangedIDMatchedByMAC(t *testing.T) {
+	e := setup(t, 0)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	stop, _ := startAgent(t, e, "old-id", time.Now())
+	eventually(t, "PC online", func() bool { return onlineCount(e) == 1 })
+	if e.snapshot().PCs[0].MAC == "" {
+		t.Skip("no network card with a MAC address in this test environment")
+	}
+	stop()
+	eventually(t, "PC offline", func() bool { return onlineCount(e) == 0 })
+	startAgent(t, e, "new-id", time.Now())
+	eventually(t, "PC online again", func() bool { return onlineCount(e) == 1 })
+	if n := len(e.snapshot().PCs); n != 1 {
+		t.Fatalf("got %d PCs, want 1 (duplicate created)", n)
+	}
+}
+
+// mustReq builds an authenticated GET request for tests.
+func mustReq(t *testing.T, e *env, method, path string) *http.Request {
+	t.Helper()
+	req, _ := http.NewRequest(method, e.base+path, nil)
+	req.Header.Set("X-NextGaming", "1")
+	return req
 }

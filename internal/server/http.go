@@ -24,6 +24,9 @@ var webFS embed.FS
 
 const cookieName = "ng_session"
 
+// errHandled means the handler already wrote the HTTP response itself.
+var errHandled = fmt.Errorf("response already written")
+
 type ctxAdmin struct{}
 
 type handler func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error)
@@ -208,6 +211,10 @@ func (s *Server) routes() http.Handler {
 		path, err := s.BackupNow()
 		return map[string]string{"path": path}, err
 	})
+	owner("GET /api/export/db", s.handleExportDB)
+	owner("GET /api/export/payments.csv", s.handleExportCSV("payments"))
+	owner("GET /api/export/sessions.csv", s.handleExportCSV("sessions"))
+	owner("POST /api/import/db", s.handleImportDB)
 
 	h("POST /api/shift/open", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		var req struct {
@@ -365,6 +372,9 @@ func (s *Server) auth(fn handler, ownerOnly bool) http.HandlerFunc {
 			return
 		}
 		v, err := fn(w, r, a)
+		if err == errHandled {
+			return // the handler already wrote the response (file download)
+		}
 		if err != nil {
 			writeErr(w, err)
 			return

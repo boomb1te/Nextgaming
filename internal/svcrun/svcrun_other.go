@@ -15,6 +15,9 @@ func MarkService() {}
 // ServiceArg is added to the command line of every installed service.
 const ServiceArg = "-service"
 
+// StopRequested is always false outside Windows.
+func StopRequested() bool { return false }
+
 // IsService is always false outside Windows.
 func IsService() bool { return false }
 

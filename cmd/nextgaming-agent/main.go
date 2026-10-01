@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"nextgaming/internal/agent"
 	"nextgaming/internal/platform"
@@ -92,6 +93,7 @@ func main() {
 		if cfg.Server == "" || cfg.ClubKey == "" {
 			fatal("both -server and -key are required")
 		}
+		cfg.InstalledAt = time.Now()
 		if err := cfg.Save(); err != nil {
 			fatal("%v", err)
 		}

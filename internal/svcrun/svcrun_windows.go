@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -67,6 +68,9 @@ func (h *handler) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 			case svc.Interrogate:
 				status <- c.CurrentStatus
 			case svc.Stop, svc.Shutdown:
+				if c.Cmd == svc.Stop {
+					stopRequested.Store(true) // stopped by someone, not by Windows shutting down
+				}
 				status <- svc.Status{State: svc.StopPending}
 				cancel()
 				select {
@@ -80,6 +84,12 @@ func (h *handler) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 		}
 	}
 }
+
+var stopRequested atomic.Bool
+
+// StopRequested reports whether the service is stopping because someone
+// stopped it (Services, Task Manager, sc stop) rather than Windows shutting down.
+func StopRequested() bool { return stopRequested.Load() }
 
 // sessionHook is called when a user logs on/off, so the agent can relaunch the lock screen.
 var sessionHook func()

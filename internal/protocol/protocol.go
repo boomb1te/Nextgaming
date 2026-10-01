@@ -37,14 +37,18 @@ const (
 	TypeAck       = "ack"
 
 	// server -> agent
-	TypeWelcome  = "welcome"
-	TypeReject   = "reject"
-	TypeState    = "state"
-	TypeMessage  = "message"
-	TypeShutdown = "shutdown"
-	TypeRestart  = "restart"
-	TypeWoLCheck = "wol_check"
+	TypeWelcome   = "welcome"
+	TypeReject    = "reject"
+	TypeState     = "state"
+	TypeMessage   = "message"
+	TypeShutdown  = "shutdown"
+	TypeRestart   = "restart"
+	TypeWoLCheck  = "wol_check"
+	TypeUninstall = "uninstall" // the PC was removed in the admin panel
 )
+
+// RejectRemoved is the Reject reason for a PC that was removed in the admin panel.
+const RejectRemoved = "removed"
 
 // Envelope wraps every message on the wire.
 type Envelope struct {
@@ -73,6 +77,9 @@ type Hello struct {
 	BoardProduct    string `json:"boardProduct"`
 	Locked          bool   `json:"locked"`
 	SessionID       int64  `json:"sessionId"`
+	// InstalledAt is when the agent was (re)installed. A PC removed in the
+	// admin panel comes back only if its agent was installed after the removal.
+	InstalledAt time.Time `json:"installedAt"`
 }
 
 // Welcome answers a valid Hello.
@@ -103,6 +110,13 @@ type DesiredState struct {
 	PCName       string `json:"pcName"`
 	ClubName     string `json:"clubName"`
 	WarnMinutes  []int  `json:"warnMinutes"`
+	// Pricing shown on the player's timer.
+	TariffName       string `json:"tariffName,omitempty"`
+	RatePerHour      int64  `json:"ratePerHour,omitempty"` // minor units
+	Paid             int64  `json:"paid,omitempty"`        // prepaid: money taken so far
+	Currency         string `json:"currency,omitempty"`
+	GraceSeconds     int    `json:"graceSeconds,omitempty"`
+	MinChargeMinutes int    `json:"minChargeMinutes,omitempty"`
 }
 
 // Heartbeat is sent by the agent every few seconds.
@@ -118,6 +132,7 @@ const (
 	EventLocalExpired = "local_expired" // agent locked because its local timer ran out
 	EventUserLogout   = "user_logout"   // player pressed "End session" on the PC
 	EventClientDied   = "client_died"   // lock screen was killed and relaunched
+	EventAgentStopped = "agent_stopped" // the agent service was stopped by someone and has started again
 )
 
 // Event is something that happened on the PC.
@@ -262,4 +277,10 @@ type ClientState struct {
 	// Message is the latest admin message; MessageID increases with each new one.
 	Message   string `json:"message"`
 	MessageID int64  `json:"messageId"`
+	// Pricing for the timer: rate per hour and the session's cost so far
+	// (prepaid: what was paid; open: what it costs if ended now). Minor units.
+	TariffName  string `json:"tariffName"`
+	RatePerHour int64  `json:"ratePerHour"`
+	Cost        int64  `json:"cost"`
+	Currency    string `json:"currency"`
 }

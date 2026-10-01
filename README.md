@@ -26,11 +26,18 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - Free "staff" unlock (never billed, always logged)
 - Player can press **End session** on the PC: the clock stops, the PC locks, the tile turns red ("Wants to pay") until the admin settles it
 
+**Timer on the gaming PC**
+- A small panel in the corner shows the tariff, time left/used, the hourly rate and the running cost
+- It is an ordinary window, so games and apps cover it (it no longer floats over everything); only time warnings and admin messages pop up briefly on top
+- No "end session" button on the PC — the desk ends sessions
+
 **PCs**
 - Live grid: free / in use / paused / wants to pay / staff / offline, with countdowns
 - Lock / unlock, message to one or all PCs, restart, shut down, **turn on (Wake-on-LAN)**
 - Bulk: wake all offline PCs, shut down all free PCs
 - New PCs register themselves as "PC 1, PC 2…"; rename and assign zones in Settings
+- **Select** several PCs at once (tap Select, tap tiles) to start sessions, message, lock, wake or shut down together
+- Removing a PC uninstalls its agent and keeps it removed; a PC is matched by its network card, so it never appears twice after a wake or an update
 
 **Wake-on-LAN assistant**
 - The agent checks the Windows side (network card settings, "allow this device to wake the computer", Fast Startup, Ethernet vs Wi-Fi) and fixes it automatically
@@ -44,12 +51,17 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - Daily report: revenue, by hour, busiest PCs, by cashier, shifts, all payments
 - Activity log of every admin action
 - Owner and cashier roles; daily automatic database backups (30 kept)
+- **Data tab**: download a full backup, restore from a backup (applied on restart), and export payments and sessions to CSV
+
+**Networks and VPNs**
+- NextGaming only talks on the club's local network, so game VPNs players run do not affect it. VPN and virtual adapters are ignored when identifying a PC.
 
 **Reliability**
 - Server is the source of truth; PCs resynchronise on every reconnect
 - If the network drops, the PC keeps counting and still locks on time
 - If the agent stops, the lock screen locks the PC ("fails closed")
 - The lock screen runs as SYSTEM, so the Gamer account cannot kill it; if it dies anyway it is restarted within a second and the admin gets an alert
+- The lock screen and the agent watch each other: stop one and the other starts it again, and the admin gets an alert
 
 ## Building
 

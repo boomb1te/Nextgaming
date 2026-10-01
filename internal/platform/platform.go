@@ -19,6 +19,7 @@ import (
 // Inventory describes this PC.
 type Inventory struct {
 	MachineID    string
+	IDMAC        string // the MAC address the machine ID was derived from
 	Hostname     string
 	BoardMaker   string
 	BoardProduct string

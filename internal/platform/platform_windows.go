@@ -96,16 +96,22 @@ func GetInventory(dataDir string) Inventory {
 		}
 	}
 	inv.BoardMaker, inv.BoardProduct = hw.BoardMaker, hw.BoardProduct
+	// The ID uses the lowest wired MAC: stable no matter which adapter is
+	// connected or got an address first during boot.
 	mac := ""
 	for _, n := range inv.NICs {
-		if n.Wired {
+		if n.Wired && (mac == "" || n.MAC < mac) {
 			mac = n.MAC
-			break
 		}
 	}
-	if mac == "" && len(inv.NICs) > 0 {
-		mac = inv.NICs[0].MAC
+	if mac == "" {
+		for _, n := range inv.NICs {
+			if mac == "" || n.MAC < mac {
+				mac = n.MAC
+			}
+		}
 	}
+	inv.IDMAC = mac
 	// Some cheap boards share a placeholder UUID, so the MAC is always mixed in.
 	inv.MachineID = makeMachineID(hw.UUID, mac)
 	if inv.MachineID == "" {
@@ -145,6 +151,9 @@ func windowsNICs() []protocol.NIC {
 			continue
 		}
 		mac := a.PhysicalAddress[:6]
+		if mac[0]&0x02 != 0 {
+			continue // locally administered address: a virtual adapter (VPN, VM), not a real card
+		}
 		n := protocol.NIC{
 			Name:  windows.UTF16PtrToString(a.FriendlyName),
 			MAC:   fmt.Sprintf("%02X-%02X-%02X-%02X-%02X-%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]),
@@ -165,7 +174,9 @@ func windowsNICs() []protocol.NIC {
 }
 
 func isVirtualAdapter(desc string) bool {
-	for _, v := range []string{"virtual", "hyper-v", "vmware", "virtualbox", "vpn", "tap-", "wireguard", "loopback", "bluetooth", "wan miniport", "zerotier", "hamachi", "radmin"} {
+	for _, v := range []string{"virtual", "hyper-v", "vmware", "virtualbox", "vpn", "tap-", "tap ", "tap-windows", "wintun",
+		"wireguard", "openvpn", "outline", "hiddify", "v2ray", "xray", "nekobox", "warp", "cloudflare", "proton", "nord", "fortinet",
+		"anyconnect", "npcap", "loopback", "bluetooth", "wan miniport", "zerotier", "hamachi", "radmin", "tailscale", "kernel debug"} {
 		if strings.Contains(desc, v) {
 			return true
 		}
@@ -218,4 +229,17 @@ func WoLCheck(dataDir string, fix bool) protocol.WoLReport {
 		rep.Error = "could not read the check result: " + err.Error()
 	}
 	return rep
+}
+
+// SelfUninstall removes the agent service from a separate process (a service
+// cannot wait for its own removal). The lock screen closes with it.
+func SelfUninstall() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(exe, "uninstall")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true,
+		CreationFlags: 0x00000200 | 0x00000008} // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+	cmd.Start()
 }

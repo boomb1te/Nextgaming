@@ -78,6 +78,9 @@ func errNotFound(what string) error {
 
 // New opens the database and prepares the server.
 func New(cfg Config) (*Server, error) {
+	if err := applyPendingRestore(cfg.DataDir()); err != nil {
+		return nil, err
+	}
 	st, err := store.Open(filepath.Join(cfg.DataDir(), "nextgaming.db"))
 	if err != nil {
 		return nil, err
@@ -247,19 +250,58 @@ func (s *Server) endExpiredLocked(sess *core.Session, now time.Time) error {
 
 // ---- agent callbacks ----
 
+// errRemoved is returned for an agent whose PC was removed in the admin panel.
+var errRemoved = errors.New("PC was removed")
+
 // registerAgent finds or creates the PC for a connecting agent.
+//
+// A PC is found by its agent's machine ID, or failing that by its network
+// card address (so a changed ID never creates a duplicate tile). A removed PC
+// stays removed unless its agent was installed again after the removal.
 func (s *Server) registerAgent(h protocol.Hello, ip string) (core.PC, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mac := pickMAC(h.NICs)
 	var pc core.PC
+	isNew := false
 	err := s.st.Tx(func(q store.Q) error {
-		existing, found, err := store.PCByMachineID(q, h.MachineID)
+		found, err := store.PCByMachineID(q, h.MachineID)
 		if err != nil {
 			return err
 		}
-		if found {
-			pc = existing
+		if found == nil {
+			// Unknown ID: maybe a PC we know whose ID changed (new agent version,
+			// different adapter order). Match it by MAC, but never steal a PC
+			// that is online right now.
+			for _, n := range h.NICs {
+				f, err := store.PCByMAC(q, n.MAC)
+				if err != nil {
+					return err
+				}
+				if f != nil && !s.hub.Online(f.ID) {
+					if err := store.SetPCMachineID(q, f.ID, h.MachineID); err != nil {
+						return err
+					}
+					found = f
+					log.Printf("agents: %s matched by MAC %s; machine ID updated", f.Name, n.MAC)
+					break
+				}
+			}
+		}
+		if found != nil && found.Deleted {
+			// Old agents do not send InstalledAt; they keep the old behaviour (come back).
+			// Removal times are stored in whole seconds, so compare seconds.
+			reinstalled := h.InstalledAt.IsZero() || h.InstalledAt.Unix() > found.DeletedAt.Unix()
+			if !reinstalled {
+				return errRemoved
+			}
+			if err := store.UndeletePC(q, found.ID); err != nil {
+				return err
+			}
+			store.Audit(q, 0, "pc_readded", found.ID, "agent was installed again")
+		}
+		if found != nil {
+			pc = found.PC
 			if mac == "" {
 				mac = pc.MAC // keep the last known MAC if the cable is unplugged right now
 			}
@@ -276,13 +318,14 @@ func (s *Server) registerAgent(h protocol.Hello, ip string) (core.PC, error) {
 			if pc.ID, err = store.CreatePC(q, pc); err != nil {
 				return err
 			}
+			isNew = true
 			store.Audit(q, 0, "pc_registered", pc.ID, fmt.Sprintf("%s (%s) registered automatically", name, h.Hostname))
 		}
 		pc.MAC, pc.IP, pc.Hostname = mac, ip, h.Hostname
 		pc.BoardMaker, pc.BoardProduct, pc.AgentVersion = h.BoardMaker, h.BoardProduct, h.AgentVersion
 		return store.UpdatePCHardware(q, pc.ID, mac, ip, h.Hostname, h.BoardMaker, h.BoardProduct, h.AgentVersion)
 	})
-	if err == nil && pc.CreatedAt.IsZero() {
+	if err == nil && isNew {
 		s.alert("info", pc.ID, "New PC connected and registered as %s (%s). Rename it or set its zone in Settings → PCs.", pc.Name, h.Hostname)
 	}
 	return pc, err
@@ -358,6 +401,8 @@ func (s *Server) agentEvent(pcID int64, ev protocol.Event) {
 		s.pushState(pcID)
 	case protocol.EventUserLogout:
 		s.playerCheckout(pcID, ev.SessionID)
+	case protocol.EventAgentStopped:
+		s.alert("warn", pcID, "NextGaming was stopped on %s (Services / Task Manager) and has started again.", s.pcName(pcID))
 	case protocol.EventClientDied:
 		s.alert("warn", pcID, "The lock screen on %s was closed and has been restarted (%s).", s.pcName(pcID), ev.Detail)
 	}
@@ -417,6 +462,12 @@ func (s *Server) desiredState(pcID int64) (protocol.DesiredState, error) {
 	now := s.now()
 	ds.SessionID = sess.ID
 	ds.Mode = string(sess.Mode)
+	ds.TariffName = sess.TariffName
+	ds.RatePerHour = int64(sess.RatePerHour)
+	ds.Paid = int64(sess.Paid)
+	ds.Currency = settings.Currency
+	ds.GraceSeconds = settings.GraceSeconds
+	ds.MinChargeMinutes = settings.MinChargeMinutes
 	if sess.Status == core.StatusPaused {
 		ds.Paused = true
 		return ds, nil
