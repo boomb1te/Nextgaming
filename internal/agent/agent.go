@@ -244,7 +244,7 @@ func (a *Agent) stableID(inv platform.Inventory) string {
 
 // watchdog keeps the lock screen alive and reports if it was killed.
 func (a *Agent) watchdog(ctx context.Context) {
-	t := time.NewTicker(time.Second)
+	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
 	for {
 		if restarted, detail := a.launcher.Ensure(); restarted {

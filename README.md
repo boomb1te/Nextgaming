@@ -62,6 +62,7 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - If the agent stops, the lock screen locks the PC ("fails closed")
 - The lock screen runs as SYSTEM, so the Gamer account cannot kill it; if it dies anyway it is restarted within a second and the admin gets an alert
 - The lock screen and the agent watch each other: stop one and the other starts it again, and the admin gets an alert
+- If the lock screen is killed repeatedly it keeps coming back (within ~0.5 s), never giving up, so the desktop is never left exposed for long. The surest protection, though, is running harden-gamer-account.ps1 so the player account cannot open Task Manager at all.
 
 ## Building
 

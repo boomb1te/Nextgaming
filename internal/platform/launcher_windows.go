@@ -38,10 +38,11 @@ type winLauncher struct {
 	args     []string
 	asSystem bool
 
-	proc    windows.Handle
-	pid     uint32
-	session uint32
-	deaths  []time.Time
+	proc      windows.Handle
+	pid       uint32
+	session   uint32
+	deaths    []time.Time
+	lastStart time.Time
 }
 
 func (l *winLauncher) running() bool {
@@ -115,8 +116,13 @@ func (l *winLauncher) Ensure() (bool, string) {
 	if restarted {
 		l.deaths = append(l.deaths, now)
 	}
-	if len(l.deaths) >= 5 && now.Sub(l.deaths[len(l.deaths)-1]) < 5*time.Second {
-		return restarted, detail
+	// If it keeps dying (a genuine crash loop, or someone killing it on purpose),
+	// do not give up — just slow to one relaunch every ~2s so we neither spin the
+	// CPU nor ever leave the desktop exposed for long.
+	if len(l.deaths) >= 5 {
+		if now.Sub(l.lastStart) < 2*time.Second {
+			return restarted, detail
+		}
 	}
 
 	var (
@@ -138,6 +144,7 @@ func (l *winLauncher) Ensure() (bool, string) {
 		return restarted, detail
 	}
 	l.proc, l.pid, l.session = h, pid, session
+	l.lastStart = now
 	return restarted, detail
 }
 
