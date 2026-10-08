@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -26,9 +27,18 @@ import (
 )
 
 const (
-	msgState  = w.WM_APP + 1
-	timerTick = 1
-	timerHide = 2
+	msgState       = w.WM_APP + 1
+	msgShowLogin   = w.WM_APP + 3
+	msgDoLogin     = w.WM_APP + 4
+	msgCancelLogin = w.WM_APP + 5
+	msgLoginResult = w.WM_APP + 6
+	timerTick      = 1
+	timerHide      = 2
+
+	idUser   = 101
+	idPass   = 102
+	idLogin  = 103
+	idCancel = 104
 )
 
 // Colours.
@@ -69,12 +79,27 @@ type app struct {
 	lastForce    time.Time
 	lockMessage  string
 	lockMsgUntil time.Time
+
+	// staff login on the lock screen
+	loginMode  bool
+	loginBusy  bool
+	loginMsg   string
+	userEdit   uintptr
+	passEdit   uintptr
+	loginBtn   uintptr
+	cancelBtn  uintptr
+	loginLabel string
+	loginErr   string
 }
 
 var theApp *app
 
 // hookLocked is read by the keyboard hook (same thread, but keep it simple).
 var hookLocked = true
+
+// hookLoginMode is true while the staff-login box is open, so the keyboard
+// hook lets typing reach the text boxes instead of swallowing it.
+var hookLoginMode = false
 
 func main() {
 	runtime.LockOSThread()
@@ -99,7 +124,7 @@ func main() {
 	}
 	vx, vy := w.GetSystemMetrics(w.SM_XVIRTUALSCREEN), w.GetSystemMetrics(w.SM_YVIRTUALSCREEN)
 	vw, vh := w.GetSystemMetrics(w.SM_CXVIRTUALSCREEN), w.GetSystemMetrics(w.SM_CYVIRTUALSCREEN)
-	a.lockWnd = w.CreateWindow(w.WS_EX_TOPMOST|w.WS_EX_TOOLWINDOW, "NextGamingLock", "NextGaming", w.WS_POPUP, vx, vy, vw, vh)
+	a.lockWnd = w.CreateWindow(w.WS_EX_TOPMOST|w.WS_EX_TOOLWINDOW|w.WS_EX_CONTROLPARENT, "NextGamingLock", "NextGaming", w.WS_POPUP, vx, vy, vw, vh)
 
 	ow, oh := a.px(300), a.px(104)
 	sw := w.GetSystemMetrics(w.SM_CXSCREEN)
@@ -115,6 +140,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "could not create windows")
 		os.Exit(1)
 	}
+
+	a.createLoginControls()
 
 	hook := w.SetKeyboardHook(syscall.NewCallback(keyboardHook))
 	defer w.Unhook(hook)
@@ -230,6 +257,7 @@ func (a *app) applyLock(locked bool) {
 		w.ForceForeground(a.lockWnd)
 		a.lastForce = time.Now()
 	} else {
+		a.hideLogin()
 		w.ShowWindow(a.lockWnd, w.SW_HIDE)
 		w.Taskbar(true)
 		w.ShowWindow(a.overlayWnd, w.SW_SHOWNOACTIVATE)
@@ -240,6 +268,113 @@ func (a *app) applyLock(locked bool) {
 			}
 		}
 	}
+}
+
+// ---- staff login box ----
+
+func (a *app) createLoginControls() {
+	font := w.Font(a.px(18), w.FW_NORMAL)
+	a.userEdit = w.CreateChild(a.lockWnd, "EDIT", "", w.WS_BORDER|w.ES_AUTOHSCROLL|w.WS_TABSTOP, 0, 0, 10, 10, idUser)
+	a.passEdit = w.CreateChild(a.lockWnd, "EDIT", "", w.WS_BORDER|w.ES_AUTOHSCROLL|w.ES_PASSWORD|w.WS_TABSTOP, 0, 0, 10, 10, idPass)
+	a.loginBtn = w.CreateChild(a.lockWnd, "BUTTON", "Log in", w.BS_DEFPUSHBUTTON|w.WS_TABSTOP, 0, 0, 10, 10, idLogin)
+	a.cancelBtn = w.CreateChild(a.lockWnd, "BUTTON", "Cancel", w.WS_TABSTOP, 0, 0, 10, 10, idCancel)
+	for _, c := range []uintptr{a.userEdit, a.passEdit, a.loginBtn, a.cancelBtn} {
+		w.SetControlFont(c, font)
+		w.ShowChild(c, false)
+	}
+}
+
+// placeLoginControls lays the box out centered on the primary monitor.
+func (a *app) placeLoginControls() {
+	ox := -w.GetSystemMetrics(w.SM_XVIRTUALSCREEN)
+	oy := -w.GetSystemMetrics(w.SM_YVIRTUALSCREEN)
+	sw, sh := w.GetSystemMetrics(w.SM_CXSCREEN), w.GetSystemMetrics(w.SM_CYSCREEN)
+	fw := a.px(300)
+	x := int32(ox) + (sw-fw)/2
+	y := int32(oy) + sh/2 - a.px(30)
+	rowH := a.px(34)
+	w.MoveControl(a.userEdit, x, y, fw, rowH)
+	w.MoveControl(a.passEdit, x, y+rowH+a.px(10), fw, rowH)
+	by := y + 2*(rowH+a.px(10))
+	bw := (fw - a.px(10)) / 2
+	w.MoveControl(a.loginBtn, x, by, bw, rowH)
+	w.MoveControl(a.cancelBtn, x+bw+a.px(10), by, bw, rowH)
+}
+
+func (a *app) showLogin() {
+	if a.loginMode || !a.locked {
+		return
+	}
+	a.loginMode = true
+	hookLoginMode = true
+	a.loginMsg = ""
+	a.placeLoginControls()
+	w.SetText(a.userEdit, "")
+	w.SetText(a.passEdit, "")
+	for _, c := range []uintptr{a.userEdit, a.passEdit, a.loginBtn, a.cancelBtn} {
+		w.Enable(c, true)
+		w.ShowChild(c, true)
+	}
+	w.ForceForeground(a.lockWnd)
+	w.SetFocus(a.userEdit)
+	w.InvalidateRect(a.lockWnd)
+}
+
+func (a *app) hideLogin() {
+	if !a.loginMode {
+		return
+	}
+	a.loginMode = false
+	hookLoginMode = false
+	a.loginMsg = ""
+	for _, c := range []uintptr{a.userEdit, a.passEdit, a.loginBtn, a.cancelBtn} {
+		w.ShowChild(c, false)
+	}
+	w.SetFocus(a.lockWnd)
+	w.InvalidateRect(a.lockWnd)
+}
+
+func (a *app) doLogin() {
+	if a.loginBusy {
+		return
+	}
+	user := w.GetText(a.userEdit)
+	pass := w.GetText(a.passEdit)
+	if user == "" || pass == "" {
+		a.loginMsg = "Enter your username and password."
+		w.InvalidateRect(a.lockWnd)
+		return
+	}
+	a.loginBusy = true
+	a.loginMsg = "Checking…"
+	w.Enable(a.loginBtn, false)
+	w.Enable(a.cancelBtn, false)
+	w.InvalidateRect(a.lockWnd)
+	go func() {
+		body, _ := json.Marshal(map[string]string{"username": user, "password": pass})
+		req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/staff-login", a.port), bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-NextGaming-Client", "1")
+		errText := ""
+		c := &http.Client{Timeout: 10 * time.Second}
+		if resp, err := c.Do(req); err != nil {
+			errText = "Cannot reach the club server."
+		} else {
+			var r struct{ Error string }
+			json.NewDecoder(resp.Body).Decode(&r)
+			resp.Body.Close()
+			if resp.StatusCode != 200 {
+				errText = r.Error
+				if errText == "" {
+					errText = "Login failed."
+				}
+			}
+		}
+		a.mu.Lock()
+		a.loginErr = errText
+		a.mu.Unlock()
+		w.PostMessage(a.lockWnd, msgLoginResult, 0, 0)
+	}()
 }
 
 func (a *app) showToast(text string, warn bool, d time.Duration) {
@@ -263,6 +398,42 @@ func wndProc(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
 	switch msg {
 	case msgState:
 		a.update()
+		return 0
+	case msgShowLogin:
+		a.showLogin()
+		return 0
+	case msgCancelLogin:
+		a.hideLogin()
+		return 0
+	case msgDoLogin:
+		a.doLogin()
+		return 0
+	case msgLoginResult:
+		a.loginBusy = false
+		w.Enable(a.loginBtn, true)
+		w.Enable(a.cancelBtn, true)
+		a.mu.Lock()
+		loginErr := a.loginErr
+		a.mu.Unlock()
+		a.loginErr = loginErr
+		if loginErr == "" {
+			a.hideLogin() // the server will unlock the PC via a state push
+		} else {
+			a.loginMsg = a.loginErr
+			w.SetText(a.passEdit, "")
+			w.SetFocus(a.passEdit)
+			w.InvalidateRect(a.lockWnd)
+		}
+		return 0
+	case w.WM_COMMAND:
+		if a.loginMode {
+			switch w.LoWord(wp) {
+			case idLogin:
+				a.doLogin()
+			case idCancel:
+				a.hideLogin()
+			}
+		}
 		return 0
 	case w.WM_TIMER:
 		if hwnd == a.toastWnd && wp == timerHide {
@@ -337,22 +508,46 @@ func overlayScreenRect(hwnd uintptr) w.RECT {
 	return r
 }
 
-// keyboardHook blocks task-switching keys while the PC is locked.
+// keyboardHook blocks task-switching keys while the PC is locked, and opens /
+// drives the staff-login box. In login mode normal keys pass through to the
+// text boxes; only escape keys and the hotkey are intercepted.
 func keyboardHook(code int, wp, lp uintptr) uintptr {
 	if code == w.HC_ACTION && hookLocked {
 		// lp points to OS-owned memory; convert without a uintptr->Pointer cast.
 		k := *(**w.KBDLLHOOKSTRUCT)(unsafe.Pointer(&lp))
 		alt := k.Flags&w.LLKHF_ALTDOWN != 0
 		ctrl := w.KeyDown(w.VK_CONTROL)
+		down := wp == w.WM_KEYDOWN || wp == w.WM_SYSKEYDOWN
+
+		// The hotkey Ctrl+Alt+L opens the staff-login box.
+		if down && ctrl && alt && k.VkCode == 'L' && !hookLoginMode {
+			w.PostMessage(theApp.lockWnd, msgShowLogin, 0, 0)
+			return 1
+		}
+
+		// Always block the OS task-switching keys.
 		switch {
 		case k.VkCode == w.VK_LWIN, k.VkCode == w.VK_RWIN, k.VkCode == w.VK_APPS:
 			return 1
-		case k.VkCode == w.VK_TAB && alt: // Alt+Tab
+		case k.VkCode == w.VK_TAB && alt:
 			return 1
-		case k.VkCode == w.VK_ESCAPE && (alt || ctrl): // Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc
+		case k.VkCode == w.VK_ESCAPE && (alt || ctrl):
 			return 1
-		case k.VkCode == w.VK_F4 && alt: // Alt+F4
+		case k.VkCode == w.VK_F4 && alt:
 			return 1
+		}
+
+		if hookLoginMode {
+			// Enter submits, Escape cancels; everything else goes to the text boxes.
+			if down && k.VkCode == w.VK_RETURN {
+				w.PostMessage(theApp.lockWnd, msgDoLogin, 0, 0)
+				return 1
+			}
+			if down && k.VkCode == w.VK_ESCAPE {
+				w.PostMessage(theApp.lockWnd, msgCancelLogin, 0, 0)
+				return 1
+			}
+			return w.CallNextHook(code, wp, lp) // let typing reach the boxes
 		}
 	}
 	return w.CallNextHook(code, wp, lp)
@@ -404,6 +599,29 @@ func (a *app) paintLock(hwnd uintptr) {
 		p.Fill(box, colPanel)
 		inner := w.RECT{Left: box.Left + sh/40, Top: box.Top + sh/50, Right: box.Right - sh/40, Bottom: box.Bottom}
 		p.Text(a.lockMessage, inner, font, colWarn, w.DT_CENTER|w.DT_WORDBREAK)
+	}
+	if a.loginMode {
+		fw := a.px(300)
+		cx := int32(ox) + (sw-fw)/2
+		top := int32(oy) + sh/2 - a.px(84)
+		// Backdrop behind the native text boxes/buttons.
+		panel := w.RECT{Left: cx - a.px(24), Top: top, Right: cx + fw + a.px(24), Bottom: int32(oy) + sh/2 + a.px(96)}
+		p.Fill(panel, colPanel)
+		p.Text("Staff log in", w.RECT{Left: panel.Left, Top: top + a.px(10), Right: panel.Right, Bottom: top + a.px(44)},
+			w.Font(a.px(22), w.FW_SEMIBOLD), colText, w.DT_CENTER|w.DT_SINGLELINE)
+		p.Text("Username", w.RECT{Left: cx, Top: int32(oy) + sh/2 - a.px(48), Right: cx + fw, Bottom: int32(oy) + sh/2 - a.px(30)},
+			w.Font(a.px(13), w.FW_NORMAL), colMuted, w.DT_SINGLELINE)
+		if a.loginMsg != "" {
+			col := colMuted
+			if a.loginErr != "" && !a.loginBusy {
+				col = colDanger
+			}
+			p.Text(a.loginMsg, w.RECT{Left: panel.Left, Top: int32(oy) + sh/2 + a.px(60), Right: panel.Right, Bottom: int32(oy) + sh/2 + a.px(92)},
+				w.Font(a.px(14), w.FW_NORMAL), col, w.DT_CENTER|w.DT_SINGLELINE|w.DT_END_ELLIPSIS)
+		}
+	} else {
+		p.Text("Staff: press Ctrl+Alt+L to log in", w.RECT{Left: ox, Top: oy + sh - sh/10, Right: ox + sw, Bottom: oy + sh - sh/14},
+			w.Font(sh/70, w.FW_NORMAL), colMuted, w.DT_CENTER|w.DT_SINGLELINE)
 	}
 	p.Text("NextGaming", w.RECT{Left: ox, Top: oy + sh - sh/18, Right: ox + sw, Bottom: oy + sh}, w.Font(sh/60, w.FW_NORMAL), colMuted, w.DT_CENTER|w.DT_SINGLELINE)
 }

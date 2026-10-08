@@ -99,6 +99,13 @@ func (s *Server) routes() http.Handler {
 		}
 		return ok(), s.MoveSession(a.ID, pathID(r), req.ToPCID)
 	})
+	h("POST /api/pcs/{id}/note", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct{ Note string }
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return ok(), s.SetPCNote(a.ID, pathID(r), req.Note)
+	})
 	h("POST /api/pcs/{id}/message", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		var req struct{ Text string }
 		if err := decode(r, &req); err != nil {
@@ -277,6 +284,16 @@ func (s *Server) routes() http.Handler {
 			return nil, err
 		}
 		return ok(), s.SetAdminDisabled(a, pathID(r), req.Disabled)
+	})
+	h("PUT /api/admins/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct{ Username, Role string }
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return ok(), s.UpdateAdmin(a, pathID(r), req.Username, req.Role)
+	})
+	h("DELETE /api/admins/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return ok(), s.DeleteAdminAccount(a, pathID(r))
 	})
 
 	return securityHeaders(mux)

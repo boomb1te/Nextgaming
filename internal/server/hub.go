@@ -216,6 +216,16 @@ func (h *Hub) serve(ctx context.Context, raw net.Conn) {
 			if a, err := protocol.Decode[protocol.Ack](env); err == nil {
 				ac.resolve(env.ID, a)
 			}
+		case protocol.TypeStaffLogin:
+			if sl, err := protocol.Decode[protocol.StaffLogin](env); err == nil {
+				go func(id string) {
+					res := protocol.Ack{OK: true}
+					if err := h.srv.staffLogin(pc.ID, sl.Username, sl.Password); err != nil {
+						res = protocol.Ack{OK: false, Error: err.Error()}
+					}
+					conn.Send(protocol.TypeAck, id, res)
+				}(env.ID)
+			}
 		}
 	}
 }

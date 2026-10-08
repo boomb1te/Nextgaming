@@ -21,6 +21,22 @@ func (a *Agent) serveLocal(ctx context.Context) error {
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.ClientState())
 	})
+	mux.HandleFunc("POST /staff-login", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-NextGaming-Client") != "1" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		var req struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req)
+		if err := a.StaffLogin(req.Username, req.Password); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	})
 	mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
 		// A custom header cannot be sent by a web page without a CORS
 		// preflight (which we never answer), so browsers cannot call this.

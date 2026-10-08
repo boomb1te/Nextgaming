@@ -408,6 +408,24 @@ func (s *Server) agentEvent(pcID int64, ev protocol.Event) {
 	}
 }
 
+// staffLogin checks a staff password entered on the lock screen and, if valid,
+// unlocks the PC as a free (staff) session started by that staff member.
+func (s *Server) staffLogin(pcID int64, username, password string) error {
+	a, err := s.Login(username, password)
+	if err != nil {
+		time.Sleep(400 * time.Millisecond) // slow down guessing
+		return errors.New("wrong username or password")
+	}
+	sess, _ := store.OpenSessionForPC(s.st.DB, pcID)
+	if sess != nil {
+		return errors.New("this PC already has a session")
+	}
+	if err := s.FreeUnlock(a.ID, pcID, "unlocked at the PC by "+a.Username); err != nil {
+		return err
+	}
+	return nil
+}
+
 // playerCheckout handles the player pressing "End session" on the PC:
 // the clock stops and the PC locks until the admin settles payment.
 func (s *Server) playerCheckout(pcID, sessionID int64) {

@@ -58,6 +58,13 @@ var (
 	pMoveWindow                    = user32.NewProc("MoveWindow")
 	pGetDC                         = user32.NewProc("GetDC")
 	pReleaseDC                     = user32.NewProc("ReleaseDC")
+	pSetFocus                      = user32.NewProc("SetFocus")
+	pGetWindowTextW                = user32.NewProc("GetWindowTextW")
+	pGetWindowTextLengthW          = user32.NewProc("GetWindowTextLengthW")
+	pSetWindowTextW                = user32.NewProc("SetWindowTextW")
+	pSendMessageW                  = user32.NewProc("SendMessageW")
+	pDestroyWindow                 = user32.NewProc("DestroyWindow")
+	pEnableWindow                  = user32.NewProc("EnableWindow")
 
 	pCreateSolidBrush       = gdi32.NewProc("CreateSolidBrush")
 	pCreateFontW            = gdi32.NewProc("CreateFontW")
@@ -150,6 +157,20 @@ const (
 	FW_BOLD              = 700
 	CLEARTYPE_QUALITY    = 5
 	ERROR_ALREADY_EXISTS = 183
+
+	WS_CHILD            = 0x40000000
+	WS_VISIBLE          = 0x10000000
+	WS_BORDER           = 0x00800000
+	WS_TABSTOP          = 0x00010000
+	ES_AUTOHSCROLL      = 0x0080
+	ES_PASSWORD         = 0x0020
+	BS_DEFPUSHBUTTON    = 0x0001
+	WM_COMMAND          = 0x0111
+	WM_SETFONT          = 0x0030
+	WM_GETDLGCODE       = 0x0087
+	BN_CLICKED          = 0
+	WS_EX_CONTROLPARENT = 0x00010000
+	VK_RETURN           = 0x0D
 )
 
 // POINT, RECT, MSG, PAINTSTRUCT, WNDCLASSEXW and KBDLLHOOKSTRUCT mirror the Win32 structs.
@@ -428,3 +449,66 @@ func Font(height, weight int32) uintptr {
 	fontCache[key] = f
 	return f
 }
+
+// CreateChild makes a child control (EDIT, BUTTON...) inside parent, with id as its control id.
+func CreateChild(parent uintptr, class, text string, style uint32, x, y, w, h int32, id uintptr) uintptr {
+	r, _, _ := pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(UTF16(class))), uintptr(unsafe.Pointer(UTF16(text))),
+		uintptr(style|WS_CHILD), uintptr(x), uintptr(y), uintptr(w), uintptr(h), parent, id, ModuleHandle(), 0)
+	return r
+}
+
+// SetControlFont applies a font to a control.
+func SetControlFont(hwnd, font uintptr) {
+	pSendMessageW.Call(hwnd, WM_SETFONT, font, 1)
+}
+
+// SetFocus moves keyboard focus to a window.
+func SetFocus(hwnd uintptr) { pSetFocus.Call(hwnd) }
+
+// ShowChild shows or hides a control.
+func ShowChild(hwnd uintptr, show bool) {
+	cmd := uintptr(SW_HIDE)
+	if show {
+		cmd = 5 // SW_SHOW
+	}
+	pShowWindow.Call(hwnd, cmd)
+}
+
+// MoveControl repositions a control.
+func MoveControl(hwnd uintptr, x, y, w, h int32) {
+	pMoveWindow.Call(hwnd, uintptr(x), uintptr(y), uintptr(w), uintptr(h), 1)
+}
+
+// GetText reads a control's text.
+func GetText(hwnd uintptr) string {
+	n, _, _ := pGetWindowTextLengthW.Call(hwnd)
+	if n == 0 {
+		return ""
+	}
+	buf := make([]uint16, int(n)+1)
+	pGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	return windows.UTF16ToString(buf)
+}
+
+// SetText sets a control's text.
+func SetText(hwnd uintptr, text string) {
+	pSetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(UTF16(text))))
+}
+
+// DestroyWindow destroys a window.
+func DestroyWindow(hwnd uintptr) { pDestroyWindow.Call(hwnd) }
+
+// Enable enables or greys out a control.
+func Enable(hwnd uintptr, enabled bool) {
+	v := uintptr(0)
+	if enabled {
+		v = 1
+	}
+	pEnableWindow.Call(hwnd, v)
+}
+
+// LoWord returns the low 16 bits (e.g. control id from WM_COMMAND wParam).
+func LoWord(v uintptr) uint16 { return uint16(v & 0xFFFF) }
+
+// HiWord returns the high 16 bits (e.g. notification code from WM_COMMAND wParam).
+func HiWord(v uintptr) uint16 { return uint16((v >> 16) & 0xFFFF) }

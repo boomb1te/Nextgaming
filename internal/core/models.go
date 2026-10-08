@@ -91,6 +91,7 @@ type PC struct {
 	BoardProduct string    `json:"boardProduct"`
 	AgentVersion string    `json:"agentVersion"`
 	WoL          WoLInfo   `json:"wol"`
+	Note         string    `json:"note"` // free staff note shown on the tile/modal
 	CreatedAt    time.Time `json:"createdAt"`
 }
 

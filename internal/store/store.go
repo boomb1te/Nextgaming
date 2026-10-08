@@ -209,6 +209,15 @@ func (s *Store) migrate() error {
 		if _, err := s.DB.Exec("PRAGMA user_version = 2"); err != nil {
 			return err
 		}
+		v = 2
+	}
+	if v < 3 {
+		if _, err := s.DB.Exec("ALTER TABLE pcs ADD COLUMN note TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		if _, err := s.DB.Exec("PRAGMA user_version = 3"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -370,6 +379,28 @@ func SetAdminPassword(q Q, id int64, hash string) error {
 	return err
 }
 
+// UpdateAdmin changes a staff account's username and role.
+func UpdateAdmin(q Q, id int64, username, role string) error {
+	_, err := q.Exec("UPDATE admins SET username=?, role=? WHERE id=?", strings.TrimSpace(username), role, id)
+	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
+		return errors.New("username already exists")
+	}
+	return err
+}
+
+// DeleteAdmin removes a staff account.
+func DeleteAdmin(q Q, id int64) error {
+	_, err := q.Exec("DELETE FROM admins WHERE id=?", id)
+	return err
+}
+
+// CountOwners returns how many enabled owner accounts exist.
+func CountOwners(q Q) (int, error) {
+	var n int
+	err := q.QueryRow("SELECT COUNT(*) FROM admins WHERE role='owner' AND disabled=0").Scan(&n)
+	return n, err
+}
+
 // SetAdminDisabled enables or disables a login.
 func SetAdminDisabled(q Q, id int64, disabled bool) error {
 	_, err := q.Exec("UPDATE admins SET disabled=? WHERE id=?", b2i(disabled), id)
@@ -494,13 +525,13 @@ func DeletePackage(q Q, id int64) error {
 
 // ---- PCs ----
 
-const pcCols = "id,name,zone_id,sort_order,machine_id,mac,ip,hostname,board_maker,board_product,agent_version,wol_status,wol_detail,wol_checked_at,wol_tested_at,wol_report,created_at"
+const pcCols = "id,name,zone_id,sort_order,machine_id,mac,ip,hostname,board_maker,board_product,agent_version,wol_status,wol_detail,wol_checked_at,wol_tested_at,wol_report,note,created_at"
 
 func scanPC(sc interface{ Scan(...any) error }) (core.PC, error) {
 	var p core.PC
 	var checked, tested, created int64
 	err := sc.Scan(&p.ID, &p.Name, &p.ZoneID, &p.SortOrder, &p.MachineID, &p.MAC, &p.IP, &p.Hostname,
-		&p.BoardMaker, &p.BoardProduct, &p.AgentVersion, &p.WoL.Status, &p.WoL.Detail, &checked, &tested, &p.WoL.Report, &created)
+		&p.BoardMaker, &p.BoardProduct, &p.AgentVersion, &p.WoL.Status, &p.WoL.Detail, &checked, &tested, &p.WoL.Report, &p.Note, &created)
 	p.WoL.CheckedAt = fromTS(checked)
 	p.WoL.TestedAt = fromTS(tested)
 	p.CreatedAt = fromTS(created)
@@ -589,7 +620,7 @@ func findPC(q Q, where string, args ...any) (*FoundPC, error) {
 	var checked, tested, created int64
 	err := q.QueryRow("SELECT "+pcCols+",deleted,deleted_at FROM pcs WHERE "+where+" ORDER BY deleted, id DESC LIMIT 1", args...).Scan(
 		&p.ID, &p.Name, &p.ZoneID, &p.SortOrder, &p.MachineID, &p.MAC, &p.IP, &p.Hostname,
-		&p.BoardMaker, &p.BoardProduct, &p.AgentVersion, &p.WoL.Status, &p.WoL.Detail, &checked, &tested, &p.WoL.Report, &created,
+		&p.BoardMaker, &p.BoardProduct, &p.AgentVersion, &p.WoL.Status, &p.WoL.Detail, &checked, &tested, &p.WoL.Report, &p.Note, &created,
 		&deleted, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -653,6 +684,12 @@ func UpdatePCHardware(q Q, id int64, mac, ip, hostname, maker, product, version 
 // UpdatePCAdmin stores admin-editable PC fields.
 func UpdatePCAdmin(q Q, id int64, name string, zoneID int64, sortOrder int) error {
 	_, err := q.Exec("UPDATE pcs SET name=?,zone_id=?,sort_order=? WHERE id=?", name, zoneID, sortOrder, id)
+	return err
+}
+
+// SetPCNote stores the free staff note on a PC.
+func SetPCNote(q Q, id int64, note string) error {
+	_, err := q.Exec("UPDATE pcs SET note=? WHERE id=?", note, id)
 	return err
 }
 

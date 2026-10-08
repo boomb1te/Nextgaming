@@ -134,12 +134,16 @@ type Agent struct {
 	messageID int64
 	messageAt time.Time
 
+	// staff-login requests we sent to the server, awaiting the server's ack
+	pending map[string]chan protocol.Ack
+	reqSeq  int64
+
 	now func() time.Time
 }
 
 // New prepares the agent.
 func New(cfg Config) *Agent {
-	a := &Agent{cfg: cfg, now: time.Now}
+	a := &Agent{cfg: cfg, now: time.Now, pending: map[string]chan protocol.Ack{}}
 	a.st = localState{Locked: true}
 	a.loadState()
 	return a
@@ -377,6 +381,10 @@ func (a *Agent) session(ctx context.Context) error {
 	defer func() {
 		a.mu.Lock()
 		a.conn, a.online = nil, false
+		for id, ch := range a.pending {
+			ch <- protocol.Ack{OK: false, Error: "lost connection to the server"}
+			delete(a.pending, id)
+		}
 		a.mu.Unlock()
 	}()
 
@@ -427,6 +435,11 @@ func (a *Agent) handle(conn *protocol.Conn, env protocol.Envelope) {
 		conn.Send(protocol.TypeAck, env.ID, r)
 	}
 	switch env.Type {
+	case protocol.TypeAck:
+		if r, err := protocol.Decode[protocol.Ack](env); err == nil {
+			a.resolvePending(env.ID, r)
+		}
+		return
 	case protocol.TypeState:
 		ds, err := protocol.Decode[protocol.DesiredState](env)
 		if err == nil {
@@ -556,6 +569,52 @@ func (a *Agent) ClientState() protocol.ClientState {
 
 // errNotConnected is returned when the player tries to end a session offline.
 var errNotConnected = errors.New("not connected to the club server; please ask the administrator")
+
+func (a *Agent) resolvePending(id string, r protocol.Ack) {
+	a.mu.Lock()
+	ch := a.pending[id]
+	delete(a.pending, id)
+	a.mu.Unlock()
+	if ch != nil {
+		ch <- r
+	}
+}
+
+// StaffLogin sends staff credentials to the server; on success the server
+// unlocks this PC as a staff session. Returns the server's answer.
+func (a *Agent) StaffLogin(username, password string) error {
+	a.mu.Lock()
+	conn := a.conn
+	if conn == nil {
+		a.mu.Unlock()
+		return errNotConnected
+	}
+	a.reqSeq++
+	id := "sl" + fmt.Sprint(a.reqSeq)
+	ch := make(chan protocol.Ack, 1)
+	a.pending[id] = ch
+	a.mu.Unlock()
+
+	if err := conn.Send(protocol.TypeStaffLogin, id, protocol.StaffLogin{Username: username, Password: password}); err != nil {
+		a.resolvePending(id, protocol.Ack{})
+		return errNotConnected
+	}
+	select {
+	case r := <-ch:
+		if !r.OK {
+			if r.Error == "" {
+				r.Error = "login failed"
+			}
+			return errors.New(r.Error)
+		}
+		return nil
+	case <-time.After(8 * time.Second):
+		a.mu.Lock()
+		delete(a.pending, id)
+		a.mu.Unlock()
+		return errors.New("the server did not answer in time")
+	}
+}
 
 // PlayerLogout is called when the player presses "End session".
 func (a *Agent) PlayerLogout(sessionID int64) error {

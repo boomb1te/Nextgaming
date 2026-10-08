@@ -423,3 +423,109 @@ func mustReq(t *testing.T, e *env, method, path string) *http.Request {
 	req.Header.Set("X-NextGaming", "1")
 	return req
 }
+
+func TestPCNote(t *testing.T) {
+	e := setup(t, 1)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	pc := e.pc("PC 1")
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/note", pc.ID), map[string]string{"note": "VIP seat"}, nil)
+	eventually(t, "note shows", func() bool { return e.pc("PC 1").Note == "VIP seat" })
+	// clearing works
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/note", pc.ID), map[string]string{"note": ""}, nil)
+	eventually(t, "note cleared", func() bool { return e.pc("PC 1").Note == "" })
+}
+
+func TestStaffAccountsEditable(t *testing.T) {
+	e := setup(t, 0)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	e.must("POST", "/api/admins", map[string]string{"username": "cash1", "password": "secret1", "role": "cashier"}, nil)
+	var admins []core.Admin
+	e.must("GET", "/api/admins", nil, &admins)
+	var cashID int64
+	for _, a := range admins {
+		if a.Username == "cash1" {
+			cashID = a.ID
+		}
+	}
+	if cashID == 0 {
+		t.Fatal("cashier not created")
+	}
+	// rename + promote
+	e.must("PUT", fmt.Sprintf("/api/admins/%d", cashID), map[string]string{"username": "boss", "role": "owner"}, nil)
+	e.must("GET", "/api/admins", nil, &admins)
+	found := false
+	for _, a := range admins {
+		if a.ID == cashID && a.Username == "boss" && a.Role == "owner" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("rename/role change did not apply")
+	}
+	// delete
+	e.must("DELETE", fmt.Sprintf("/api/admins/%d", cashID), nil, nil)
+	e.must("GET", "/api/admins", nil, &admins)
+	for _, a := range admins {
+		if a.ID == cashID {
+			t.Fatal("account not deleted")
+		}
+	}
+	// cannot delete self (the only owner)
+	var me core.Admin
+	e.must("GET", "/api/me", nil, &me)
+	if err := e.call("DELETE", fmt.Sprintf("/api/admins/%d", me.ID), nil, nil); err == nil {
+		t.Fatal("deleting own/only-owner account must fail")
+	}
+}
+
+func TestStaffLoginAtPC(t *testing.T) {
+	e := setup(t, 1)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	pc := e.pc("PC 1")
+	// Wrong password: no unlock.
+	if err := e.s.staffLogin(pc.ID, "owner", "wrong"); err == nil {
+		t.Fatal("wrong password accepted")
+	}
+	// Right password: PC unlocks as a free (staff) session.
+	if err := e.s.staffLogin(pc.ID, "owner", "secret1"); err != nil {
+		t.Fatalf("staff login: %v", err)
+	}
+	eventually(t, "PC unlocked by staff", func() bool {
+		p := e.pc("PC 1")
+		return p.State == "staff" && !e.clientState(0).Locked
+	})
+	// Already has a session -> refused.
+	if err := e.s.staffLogin(pc.ID, "owner", "secret1"); err == nil {
+		t.Fatal("staff login on a busy PC should fail")
+	}
+}
+
+// Full wire path: POST to the agent's local staff-login API unlocks the PC.
+func TestStaffLoginWire(t *testing.T) {
+	e := setup(t, 1)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	post := func(user, pass string) int {
+		b, _ := json.Marshal(map[string]string{"username": user, "password": pass})
+		req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/staff-login", e.ports[0]), bytes.NewReader(b))
+		req.Header.Set("X-NextGaming-Client", "1")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("staff-login request: %v", err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if post("owner", "nope") == 200 {
+		t.Fatal("wrong password accepted over the wire")
+	}
+	if e.pc("PC 1").State != "free" {
+		t.Fatal("PC should still be free after a failed login")
+	}
+	if code := post("owner", "secret1"); code != 200 {
+		t.Fatalf("staff login failed over the wire: %d", code)
+	}
+	eventually(t, "PC unlocked by staff over the wire", func() bool {
+		return e.pc("PC 1").State == "staff" && !e.clientState(0).Locked
+	})
+}

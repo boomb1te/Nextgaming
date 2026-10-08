@@ -585,6 +585,23 @@ func (s *Server) UpdatePC(adminID, pcID int64, name string, zoneID int64, sortOr
 	return err
 }
 
+// SetPCNote saves the free staff note on a PC (any staff).
+func (s *Server) SetPCNote(adminID, pcID int64, note string) error {
+	note = strings.TrimSpace(note)
+	if len(note) > 500 {
+		return errBad("note is too long (500 characters max)")
+	}
+	if _, err := store.PCByID(s.st.DB, pcID); err != nil {
+		return errNotFound("PC")
+	}
+	if err := store.SetPCNote(s.st.DB, pcID, note); err != nil {
+		return err
+	}
+	store.Audit(s.st.DB, adminID, "pc_note", pcID, note)
+	s.changed()
+	return nil
+}
+
 // DeletePC removes a PC from the list (history is kept). If the PC is online,
 // its agent is told to uninstall itself, so the PC is free to use and does
 // not register again. Reinstalling the agent later brings the PC back.
@@ -992,4 +1009,75 @@ func (s *Server) SetAdminDisabled(by core.Admin, targetID int64, disabled bool) 
 	}
 	store.Audit(s.st.DB, by.ID, "admin_disable", 0, fmt.Sprintf("admin %d disabled=%v", targetID, disabled))
 	return nil
+}
+
+// UpdateAdmin renames a staff account and/or changes its role (owner only).
+func (s *Server) UpdateAdmin(by core.Admin, targetID int64, username, role string) error {
+	if by.Role != core.RoleOwner {
+		return &apiError{403, "only the owner can manage staff accounts"}
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return errBad("username is required")
+	}
+	if role != core.RoleOwner && role != core.RoleCashier {
+		return errBad("role must be owner or cashier")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.st.Tx(func(q store.Q) error {
+		target, err := store.AdminByID(q, targetID)
+		if err != nil {
+			return errNotFound("account")
+		}
+		// Don't allow removing the last owner by demoting them.
+		if target.Role == core.RoleOwner && role != core.RoleOwner {
+			owners, err := store.CountOwners(q)
+			if err != nil {
+				return err
+			}
+			if owners <= 1 {
+				return errConflict("this is the only owner account; make another owner first")
+			}
+		}
+		if err := store.UpdateAdmin(q, targetID, username, role); err != nil {
+			return errConflict("%v", err)
+		}
+		if by.ID == targetID && role != core.RoleOwner {
+			s.logins.DeleteAdmin(targetID) // you demoted yourself: re-login needed
+		}
+		return store.Audit(q, by.ID, "admin_update", 0, fmt.Sprintf("admin %d -> %s (%s)", targetID, username, role))
+	})
+}
+
+// DeleteAdminAccount removes a staff account (owner only).
+func (s *Server) DeleteAdminAccount(by core.Admin, targetID int64) error {
+	if by.Role != core.RoleOwner {
+		return &apiError{403, "only the owner can manage staff accounts"}
+	}
+	if by.ID == targetID {
+		return errBad("you cannot delete your own account")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.st.Tx(func(q store.Q) error {
+		target, err := store.AdminByID(q, targetID)
+		if err != nil {
+			return errNotFound("account")
+		}
+		if target.Role == core.RoleOwner {
+			owners, err := store.CountOwners(q)
+			if err != nil {
+				return err
+			}
+			if owners <= 1 {
+				return errConflict("this is the only owner account; make another owner first")
+			}
+		}
+		if err := store.DeleteAdmin(q, targetID); err != nil {
+			return err
+		}
+		s.logins.DeleteAdmin(targetID)
+		return store.Audit(q, by.ID, "admin_delete", 0, fmt.Sprintf("admin %d", targetID))
+	})
 }

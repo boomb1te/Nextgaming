@@ -30,11 +30,12 @@ const (
 // Message types.
 const (
 	// agent -> server
-	TypeHello     = "hello"
-	TypeHeartbeat = "heartbeat"
-	TypeWoLReport = "wol_report"
-	TypeEvent     = "event"
-	TypeAck       = "ack"
+	TypeHello      = "hello"
+	TypeHeartbeat  = "heartbeat"
+	TypeWoLReport  = "wol_report"
+	TypeEvent      = "event"
+	TypeAck        = "ack"
+	TypeStaffLogin = "staff_login" // agent -> server: unlock this PC for staff after a password
 
 	// server -> agent
 	TypeWelcome   = "welcome"
@@ -151,6 +152,14 @@ type Message struct {
 type Ack struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+// StaffLogin is sent by the agent when staff enter their password on the lock
+// screen. The server checks it and, if valid, starts a free (staff) session on
+// that PC. It replies with an Ack (ok, or an error message).
+type StaffLogin struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // WoLCheck asks the agent to check (and optionally fix) its Wake-on-LAN setup.

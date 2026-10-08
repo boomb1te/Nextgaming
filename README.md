@@ -36,7 +36,8 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - Lock / unlock, message to one or all PCs, restart, shut down, **turn on (Wake-on-LAN)**
 - Bulk: wake all offline PCs, shut down all free PCs
 - New PCs register themselves as "PC 1, PC 2…"; rename and assign zones in Settings
-- **Select** several PCs at once (tap Select, tap tiles) to start sessions, message, lock, wake or shut down together
+- **Select** several PCs at once (tap Select, tap tiles) to start sessions, message, lock, wake or shut down together; starting a session on a selection asks prepaid or open first
+- A **free note per PC** (e.g. "VIP seat", "keyboard replaced"), shown in the PC window with a 📝 mark on the tile
 - Removing a PC uninstalls its agent and keeps it removed; a PC is matched by its network card, so it never appears twice after a wake or an update
 
 **Wake-on-LAN assistant**
@@ -50,7 +51,7 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - Every payment, refund and correction is a row in an append-only cash log (the database refuses edits)
 - Daily report: revenue, by hour, busiest PCs, by cashier, shifts, all payments
 - Activity log of every admin action
-- Owner and cashier roles; daily automatic database backups (30 kept)
+- Owner and cashier roles, **fully editable** (rename, change role, reset password, enable/disable, delete; the last owner is protected); daily automatic database backups (30 kept)
 - **Data tab**: download a full backup, restore from a backup (applied on restart), and export payments and sessions to CSV
 
 **Networks and VPNs**

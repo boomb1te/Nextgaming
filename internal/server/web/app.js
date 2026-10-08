@@ -355,7 +355,7 @@ function renderPCs() {
       else pcModal(pc.id);
     } },
       S.selecting ? h('div', { class: 'tickbox' }, on ? '✓' : '') : null,
-      h('div', { class: 'name' }, pc.name, wolBadge(pc)),
+      h('div', { class: 'name' }, pc.name, pc.note ? h('span', { class: 'noteflag', title: pc.note }, '📝') : null, wolBadge(pc)),
       h('div', { class: 'state' }, STATE_LABEL[pc.state] || pc.state),
       tileTimer(pc),
       h('div', { class: 'sub' }, tileSub(pc)),
@@ -467,10 +467,19 @@ function pcModal(id) {
     power.push(h('button', { class: 'btn primary', disabled: !pc.mac, onclick: run(() => api('POST', `/api/pcs/${pc.id}/wake`), 'Wake signal sent. The PC should appear online within a minute.') }, 'Turn on (Wake-on-LAN)'));
   }
 
+  // Per-PC note.
+  const noteInput = h('input', { type: 'text', maxlength: 500, value: pc.note || '', placeholder: 'e.g. keyboard replaced, VIP seat…', style: 'flex:1' });
+  const noteBtn = h('button', { class: 'btn' }, 'Save note');
+  noteBtn.onclick = e => act(e.target, () => api('POST', `/api/pcs/${pc.id}/note`, { note: noteInput.value }), 'Note saved').catch(() => {});
+  const noteSection = h('div', { class: 'section' },
+    h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'PC note'),
+    h('div', { class: 'row' }, noteInput, noteBtn));
+
   m = modal(pc.name, h('div', null,
     info,
     btns.length ? h('div', { class: 'section row' }, btns) : null,
     h('div', { class: 'section row' }, power),
+    noteSection,
     h('div', { class: 'section' }, wolSection(pc, () => m.close()))));
 }
 
@@ -609,15 +618,19 @@ function startManyModal(ids) {
   const first = pcById(ids[0]);
   const rate = (zoneById(first.zoneId) || {}).hourlyRate || 0;
   const zonesInSel = new Set(ids.map(i => (pcById(i) || {}).zoneId));
-  let mode = 'prepaid', choice = null;
+  let mode = null, choice = null; // ask prepaid vs open first
   const priceEl = h('div', { class: 'price' });
   const pickerBox = h('div');
-  const startBtn = h('button', { class: 'btn primary' }, 'Start');
+  const startBtn = h('button', { class: 'btn primary', style: 'display:none' }, 'Start');
   const modeBtns = [['prepaid', 'Prepaid (fixed time)'], ['open', 'Open (pay at the end)']].map(([k, l]) =>
     h('button', { type: 'button', class: 'btn', onclick: () => { mode = k; draw(); } }, l));
   function draw() {
     modeBtns.forEach((b, i) => b.classList.toggle('primary', ['prepaid', 'open'][i] === mode));
-    if (mode === 'prepaid') {
+    startBtn.style.display = mode ? '' : 'none';
+    if (mode === null) {
+      pickerBox.replaceChildren(h('p', { class: 'muted' }, 'Choose Prepaid or Open above.'));
+      priceEl.textContent = '';
+    } else if (mode === 'prepaid') {
       pickerBox.replaceChildren(tariffPicker(first, rate, c => { choice = c; priceEl.textContent = `${mins(c.minutesTotal)} on each PC`; startBtn.textContent = `Start on ${ids.length} PC(s)`; }));
     } else {
       choice = null;
@@ -628,6 +641,7 @@ function startManyModal(ids) {
   }
   const m = modal(`Start session on ${ids.length} PCs`, h('div', null,
     zonesInSel.size > 1 ? h('p', { class: 'muted small' }, 'Selected PCs are in different zones; each is billed at its own zone rate. A package applies only to PCs in its zone.') : null,
+    h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'Session type'),
     h('div', { class: 'row', style: 'margin-bottom:10px' }, modeBtns), pickerBox, priceEl),
   [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), startBtn]);
   startBtn.onclick = async () => {
@@ -1043,14 +1057,29 @@ function pcsCard() {
 function staffCard() {
   const box = h('div', null, h('p', { class: 'muted' }, 'Loading…'));
   const load = () => api('GET', '/api/admins').then(list => {
-    box.replaceChildren(h('table', null, h('tr', null, h('th', null, 'Username'), h('th', null, 'Role'), h('th', null, 'Status'), h('th', null, '')),
+    box.replaceChildren(h('div', { style: 'overflow-x:auto' }, h('table', null,
+      h('tr', null, ['Username', 'Role', 'Status', 'New password', ''].map(t => h('th', null, t))),
       list.map(a => {
-        const pw = h('input', { type: 'password', placeholder: 'new password', style: 'width:130px' });
-        return h('tr', null, h('td', null, a.username), h('td', null, a.role), h('td', null, a.disabled ? 'disabled' : 'active'),
-          h('td', null, a.id !== S.me.id ? [pw, ' ',
-            h('button', { class: 'btn small', onclick: e => act(e.target, () => api('POST', `/api/admins/${a.id}/password`, { password: pw.value }), 'Password set').catch(() => {}) }, 'Set password'), ' ',
-            h('button', { class: 'btn small', onclick: e => act(e.target, () => api('POST', `/api/admins/${a.id}/disabled`, { disabled: !a.disabled }), 'Saved').then(load).catch(() => {}) }, a.disabled ? 'Enable' : 'Disable')] : h('span', { class: 'muted small' }, 'you')));
-      })));
+        const isMe = a.id === S.me.id;
+        const name = h('input', { type: 'text', value: a.username, style: 'width:120px' });
+        const role = h('select', null, h('option', { value: 'cashier' }, 'Cashier'), h('option', { value: 'owner' }, 'Owner'));
+        role.value = a.role;
+        const pw = h('input', { type: 'password', placeholder: '(unchanged)', style: 'width:120px', autocomplete: 'new-password' });
+        const saveDetails = h('button', { class: 'btn small primary' }, 'Save');
+        saveDetails.onclick = async e => {
+          await act(e.target, () => api('PUT', `/api/admins/${a.id}`, { username: name.value, role: role.value }), 'Saved').catch(() => {});
+          if (pw.value) await act(e.target, () => api('POST', `/api/admins/${a.id}/password`, { password: pw.value }), 'Password set').catch(() => {});
+          pw.value = ''; load();
+        };
+        const toggle = h('button', { class: 'btn small', onclick: e => act(e.target, () => api('POST', `/api/admins/${a.id}/disabled`, { disabled: !a.disabled }), 'Saved').then(load).catch(() => {}) }, a.disabled ? 'Enable' : 'Disable');
+        const del = h('button', { class: 'btn small danger', onclick: async e => { if (await confirmBox('Delete account', `Delete ${a.username}?`, 'Delete', true)) { await act(e.target, () => api('DELETE', `/api/admins/${a.id}`), 'Deleted').then(load).catch(() => {}); } } }, 'Delete');
+        return h('tr', null,
+          h('td', null, isMe ? h('b', null, a.username) : name),
+          h('td', null, isMe ? a.role : role),
+          h('td', null, a.disabled ? 'disabled' : 'active'),
+          h('td', null, isMe ? h('span', { class: 'muted small' }, '—') : pw),
+          h('td', null, isMe ? h('span', { class: 'muted small' }, 'you') : [saveDetails, ' ', toggle, ' ', del]));
+      }))));
   }).catch(e => box.replaceChildren(h('p', { class: 'error' }, e.message)));
   load();
   const u = h('input', { type: 'text' });

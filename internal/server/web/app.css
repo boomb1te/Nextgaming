@@ -116,3 +116,5 @@ pre.cmd { background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 6px
 .tile.selected { box-shadow: 0 0 0 3px var(--blue); }
 .tile .tickbox { position: absolute; top: 6px; right: 8px; width: 20px; height: 20px; border: 2px solid var(--blue); border-radius: 4px; background: #fff; color: var(--blue); font-weight: 700; text-align: center; line-height: 18px; font-size: 13px; }
 .selbar { position: sticky; top: 0; z-index: 10; }
+
+.noteflag { font-size: 12px; margin-left: 4px; cursor: help; }
