@@ -57,6 +57,9 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 **Networks and VPNs**
 - NextGaming only talks on the club's local network, so game VPNs players run do not affect it. VPN and virtual adapters are ignored when identifying a PC.
 
+**Staff at a gaming PC**
+- A staff member at a locked gaming PC presses **Ctrl+Alt+L**, enters their NextGaming username and password, and the PC unlocks as a staff (free) session — no walking back to the desk. No browser opens and the desktop is never exposed.
+
 **Reliability**
 - Server is the source of truth; PCs resynchronise on every reconnect
 - If the network drops, the PC keeps counting and still locks on time
