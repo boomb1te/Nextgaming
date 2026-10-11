@@ -218,9 +218,79 @@ func (s *Store) migrate() error {
 		if _, err := s.DB.Exec("PRAGMA user_version = 3"); err != nil {
 			return err
 		}
+		v = 3
+	}
+	if v < 4 {
+		// v4: clients and groups for the booking system. Name and phone are not
+		// unique (a person may appear more than once, and names repeat).
+		if _, err := s.DB.Exec(schemaV4); err != nil {
+			return err
+		}
+		if _, err := s.DB.Exec("PRAGMA user_version = 4"); err != nil {
+			return err
+		}
+		v = 4
+	}
+	if v < 5 {
+		// v5: bookings. A session started by a booking carries its booking_id.
+		if _, err := s.DB.Exec(schemaV5); err != nil {
+			return err
+		}
+		if _, err := s.DB.Exec("PRAGMA user_version = 5"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
+
+const schemaV5 = `
+CREATE TABLE IF NOT EXISTS bookings (
+	id         INTEGER PRIMARY KEY,
+	client_id  INTEGER NOT NULL DEFAULT 0,
+	group_id   INTEGER NOT NULL DEFAULT 0,
+	start_at   INTEGER NOT NULL,
+	end_at     INTEGER NOT NULL,
+	note       TEXT NOT NULL DEFAULT '',
+	status     TEXT NOT NULL,
+	created_by INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	started_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS booking_pcs (
+	booking_id INTEGER NOT NULL,
+	pc_id      INTEGER NOT NULL,
+	PRIMARY KEY (booking_id, pc_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bookings_start ON bookings(start_at);
+CREATE INDEX IF NOT EXISTS idx_booking_pcs_pc ON booking_pcs(pc_id);
+ALTER TABLE sessions ADD COLUMN booking_id INTEGER NOT NULL DEFAULT 0;
+`
+
+const schemaV4 = `
+CREATE TABLE IF NOT EXISTS clients (
+	id         INTEGER PRIMARY KEY,
+	name       TEXT NOT NULL,
+	phone      TEXT NOT NULL,
+	note       TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	deleted_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone);
+CREATE TABLE IF NOT EXISTS client_groups (
+	id         INTEGER PRIMARY KEY,
+	name       TEXT NOT NULL,
+	note       TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	deleted_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS group_members (
+	group_id  INTEGER NOT NULL,
+	client_id INTEGER NOT NULL,
+	PRIMARY KEY (group_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id);
+CREATE INDEX IF NOT EXISTS idx_group_members_client ON group_members(client_id);
+`
 
 // ---- time helpers (stored as unix seconds, UTC) ----
 

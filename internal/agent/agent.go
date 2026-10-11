@@ -39,6 +39,10 @@ type Config struct {
 	ClientAsSystem bool `json:"clientAsSystem"`
 	// LocalPort is where the lock screen talks to the agent (127.0.0.1 only).
 	LocalPort int `json:"localPort"`
+	// SharedDir is the one folder the front desk can read/write over the LAN
+	// (file sharing). Empty = the platform default. The agent never exposes
+	// anything outside it.
+	SharedDir string `json:"sharedDir,omitempty"`
 	// MachineID overrides the hardware-derived ID (simulation and tests only).
 	MachineID string `json:"machineId,omitempty"`
 	// InstalledAt is set by "install". A PC removed in the admin panel only
@@ -124,6 +128,10 @@ type Agent struct {
 	inv      platform.Inventory
 	launcher platform.Launcher
 
+	capLauncher platform.Launcher
+
+	sharedDir string // the one folder exposed to the front desk (file sharing)
+
 	mu        sync.Mutex
 	st        localState
 	conn      *protocol.Conn
@@ -138,12 +146,20 @@ type Agent struct {
 	pending map[string]chan protocol.Ack
 	reqSeq  int64
 
+	// screen capture: the server asks for a frame, the lock screen long-polls
+	// capWake and grabs one. capWake is closed (and replaced) on each request.
+	capMu   sync.Mutex
+	capSeq  int64
+	capW    int
+	capQ    int
+	capWake chan struct{}
+
 	now func() time.Time
 }
 
 // New prepares the agent.
 func New(cfg Config) *Agent {
-	a := &Agent{cfg: cfg, now: time.Now, pending: map[string]chan protocol.Ack{}}
+	a := &Agent{cfg: cfg, now: time.Now, pending: map[string]chan protocol.Ack{}, capWake: make(chan struct{})}
 	a.st = localState{Locked: true}
 	a.loadState()
 	return a
@@ -174,6 +190,17 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.cfg.Server == "" || a.cfg.ClubKey == "" {
 		return errors.New("agent is not configured: run 'nextgaming-agent install -server <address> -key <club key>'")
 	}
+	a.sharedDir = a.cfg.SharedDir
+	if a.sharedDir == "" {
+		a.sharedDir = platform.DefaultSharedDir()
+	}
+	if err := os.MkdirAll(a.sharedDir, 0o755); err != nil {
+		log.Printf("shared folder %s: %v (file sharing disabled)", a.sharedDir, err)
+		a.sharedDir = ""
+	} else {
+		log.Printf("shared folder: %s", a.sharedDir)
+	}
+
 	a.inv = platform.GetInventory(a.cfg.dataDir)
 	if a.cfg.MachineID != "" {
 		a.inv.MachineID = a.cfg.MachineID
@@ -194,11 +221,20 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	a.launcher = platform.NewLauncher(clientPath, []string{"-port", fmt.Sprint(a.cfg.LocalPort)}, a.cfg.ClientAsSystem)
 	defer a.launcher.Stop()
+	// Screen capture must run as the logged-in user: a SYSTEM process's GDI
+	// screen grab of the composited desktop comes back black. So the lock
+	// screen stays SYSTEM (anti-kill) and a separate helper (-capture), run as
+	// the user, does the capturing. Both launchers are built before any
+	// watchdog starts, so the shared "kill leftover clients" step cannot kill a
+	// freshly started one.
+	a.capLauncher = platform.NewLauncher(clientPath, []string{"-port", fmt.Sprint(a.cfg.LocalPort), "-capture"}, false)
+	defer a.capLauncher.Stop()
 
 	if err := a.serveLocal(ctx); err != nil {
 		return err
 	}
 	go a.watchdog(ctx)
+	go a.captureWatchdog(ctx)
 	go a.tick(ctx)
 	a.connectLoop(ctx)
 	if svcrun.StopRequested() {
@@ -254,6 +290,24 @@ func (a *Agent) watchdog(ctx context.Context) {
 		if restarted, detail := a.launcher.Ensure(); restarted {
 			log.Printf("lock screen died (%s); restarted", detail)
 			a.sendEvent(protocol.Event{Kind: protocol.EventClientDied, Detail: detail})
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// captureWatchdog keeps the user-level screen-capture helper running. Unlike
+// the lock screen, its death is not a security event, so it is simply
+// restarted without alerting the admin.
+func (a *Agent) captureWatchdog(ctx context.Context) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		if a.capLauncher != nil {
+			a.capLauncher.Ensure()
 		}
 		select {
 		case <-ctx.Done():
@@ -469,6 +523,60 @@ func (a *Agent) handle(conn *protocol.Conn, env protocol.Envelope) {
 	case protocol.TypeWoLCheck:
 		chk, _ := protocol.Decode[protocol.WoLCheck](env)
 		go a.reportWoL(conn, env.ID, chk.Fix)
+	case protocol.TypeCapture:
+		req, err := protocol.Decode[protocol.CaptureRequest](env)
+		if err == nil {
+			a.requestCapture(req.Width, req.Quality)
+		}
+	case protocol.TypeFSList:
+		req, _ := protocol.Decode[protocol.FSListRequest](env)
+		listing, err := a.fsList(req.Rel)
+		if env.ID == "" {
+			return
+		}
+		if err != nil {
+			conn.Send(protocol.TypeAck, env.ID, protocol.Ack{OK: false, Error: err.Error()})
+			return
+		}
+		data, _ := json.Marshal(listing)
+		conn.Send(protocol.TypeAck, env.ID, protocol.Ack{OK: true, Data: data})
+	case protocol.TypeFSPush:
+		req, err := protocol.Decode[protocol.FSPush](env)
+		ack(err)
+		if err == nil {
+			go a.fsPush(req)
+		}
+	case protocol.TypeFSPull:
+		req, err := protocol.Decode[protocol.FSPull](env)
+		ack(err)
+		if err == nil {
+			go a.fsPull(req)
+		}
+	}
+}
+
+// requestCapture records the server's capture parameters and wakes the lock
+// screen's /capture-wait long-poll so it grabs a frame immediately.
+func (a *Agent) requestCapture(width, quality int) {
+	if width <= 0 {
+		return
+	}
+	a.capMu.Lock()
+	a.capSeq++
+	a.capW, a.capQ = width, quality
+	old := a.capWake
+	a.capWake = make(chan struct{})
+	a.capMu.Unlock()
+	close(old) // release every waiting /capture-wait at once
+}
+
+// sendScreen relays one captured frame from the lock screen to the server.
+func (a *Agent) sendScreen(data []byte, w, h int) {
+	a.mu.Lock()
+	conn := a.conn
+	a.mu.Unlock()
+	if conn != nil {
+		conn.Send(protocol.TypeScreenFrame, "", protocol.ScreenFrame{Data: data, W: w, H: h})
 	}
 }
 

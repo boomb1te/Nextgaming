@@ -36,9 +36,18 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - Lock / unlock, message to one or all PCs, restart, shut down, **turn on (Wake-on-LAN)**
 - Bulk: wake all offline PCs, shut down all free PCs
 - New PCs register themselves as "PC 1, PC 2…"; rename and assign zones in Settings
-- **Select** several PCs at once (tap Select, tap tiles) to start sessions, message, lock, wake or shut down together; starting a session on a selection asks prepaid or open first
+- **Select** several PCs at once (tap Select, tap tiles) to start sessions, message, pause, resume, lock, wake or shut down together; starting a session on a selection asks prepaid or open first. Lock pauses a paid session (its time and money are kept — settle it per PC to close it) and fully ends a free/staff one
 - A **free note per PC** (e.g. "VIP seat", "keyboard replaced"), shown in the PC window with a 📝 mark on the tile
 - Removing a PC uninstalls its agent and keeps it removed; a PC is matched by its network card, so it never appears twice after a wake or an update
+
+**Live screens**
+- A **Screens** tab shows every online PC as a thumbnail, refreshed every 2–3 seconds; all PCs are captured on the same tick so the grid updates together
+- Click a screen to open it full-size; that one PC then sends a sharper image about once a second
+- Capturing happens only while the tab is open — nothing is sent, and no PC is touched, when nobody is watching
+- Low bandwidth and CPU: small, low-quality JPEGs, captured by a small helper that the agent runs as the logged-in user (a SYSTEM process's screen grab comes back black)
+- Capture uses the Desktop Duplication API (the real GPU output), so **borderless / windowed-fullscreen games are captured** and resolution changes are followed automatically; it falls back to a plain screen grab on older hardware or Remote Desktop
+- **True exclusive-fullscreen games cannot be captured** by any monitoring tool without injecting into the game — they show the desktop instead. Set games to borderless / windowed-fullscreen (most default to this) to see them on the grid
+- Taking control of a PC (remote mouse/keyboard) is a planned follow-up; today the Screens tab is view-only, and the PCs tab already locks, messages, or ends a session on any PC
 
 **Wake-on-LAN assistant**
 - The agent checks the Windows side (network card settings, "allow this device to wake the computer", Fast Startup, Ethernet vs Wi-Fi) and fixes it automatically
@@ -54,11 +63,31 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - Owner and cashier roles, **fully editable** (rename, change role, reset password, enable/disable, delete; the last owner is protected); daily automatic database backups (30 kept)
 - **Data tab**: download a full backup, restore from a backup (applied on restart), and export payments and sessions to CSV
 
+**Clients & groups** (for booking)
+- A **Clients** tab: add customers with a name and phone (both required; neither has to be unique — the same name or number can repeat), plus an optional note ("regular", "VIP", "banned"). Search by name or phone.
+- **Groups**: a named set of clients booked together (e.g. a team). A group keeps at least one member; add or remove members anytime.
+- Deleting a client keeps booking history; the client just leaves its groups.
+
+**Bookings**
+- A **Bookings** tab with a weekly view: reserve one or more PCs for a client or a group, for a time window.
+- **Fully editable** anytime — change the time, length, PCs or who it's for; cancel it.
+- **Auto-start**: when a booking's time comes, its PCs start an open session for that client automatically; offline PCs are woken a few minutes beforehand. A free PC shows a "📅 Booked 19:00 — Merdan" marker until then.
+- **Never auto-ends** — you always end sessions yourself, so no live game is cut off. End and collect at the desk when the group leaves.
+- **Overlaps are a soft warning** — booking a PC that's already booked for that time warns you and lets you book anyway; you resolve clashes by editing the bookings.
+- **Release — no-show**: if a group doesn't show, one click frees their PCs (ends the sessions with no charge) and logs the no-show.
+
+**File sharing** (local network only)
+- A **Files** tab with two panes: the **front-desk PC's own filesystem** on the left (browse anywhere — it's your trusted machine) and **one gaming PC's shared folder** on the right. Copy a file either way with one click.
+- Each gaming PC exposes exactly **one fixed shared folder** — `C:\NextGaming\Shared` — and nothing outside it; the agent refuses any path that would escape it (no `..`, no symlinks, no absolute paths).
+- The file bytes travel over a direct HTTP request between the agent and the server (authenticated by the club key and a one-time token), so a large transfer never blocks heartbeats or live screens. Listings and commands go over the normal control channel.
+- A live **Transfers** list shows each copy's direction, size, progress and result; a file is never silently overwritten on the front desk (it gets " (2)", " (3)"… instead).
+- This feature is **local-network only** and is deliberately excluded from any future remote/online build.
+
 **Networks and VPNs**
 - NextGaming only talks on the club's local network, so game VPNs players run do not affect it. VPN and virtual adapters are ignored when identifying a PC.
 
 **Staff at a gaming PC**
-- A staff member at a locked gaming PC presses **Ctrl+Alt+L**, enters their NextGaming username and password, and the PC unlocks as a staff (free) session — no walking back to the desk. No browser opens and the desktop is never exposed.
+- A staff member at a locked gaming PC clicks the **Staff log in** button on the lock screen (or presses Ctrl+Alt+L), enters their NextGaming username and password, and the PC unlocks as a staff (free) session — no walking back to the desk. No browser opens and the desktop is never exposed.
 
 **Reliability**
 - Server is the source of truth; PCs resynchronise on every reconnect
@@ -151,6 +180,7 @@ server with SQLite). These parts need their first test on a real Windows 10/11 P
 
 - Running as Windows services, and launching the lock screen as SYSTEM into the Gamer session
 - The keyboard blocking (Wine does not deliver low-level keyboard hooks like Windows does)
+- Screen capture for the Screens tab (DXGI Desktop Duplication with a GDI fallback; untestable off Windows)
 - `wolcheck.ps1` (network card, Fast Startup) and the real Wake-on-LAN test
 - `harden-gamer-account.ps1`
 - Multi-monitor and high-DPI layouts of the lock screen
@@ -159,7 +189,8 @@ server with SQLite). These parts need their first test on a real Windows 10/11 P
 
 - No customer accounts or balances (the database already has an empty `customer_id` on sessions for later)
 - Games left open by the previous player are not closed when the PC locks
-- No online payments, receipts, snack sales, booking, or multi-club support
+- No online payments, receipts, snack sales, remote PC control, or multi-club support (booking is admin-entered only — customers can't self-book)
+- File sharing is one fixed folder per gaming PC (not a go-anywhere file manager) and local-network only; whole-folder/recursive copies and browsing arbitrary folders on a gaming PC are not in v1
 - Admin logins are kept in memory: restarting the server logs everyone out
 - The admin panel uses plain HTTP on the local network
 

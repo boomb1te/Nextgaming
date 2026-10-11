@@ -1,3 +1,11 @@
+# github.com/kirides/go-d3d v0.0.0-20250703131208-f1b3b192d260
+## explicit; go 1.24
+github.com/kirides/go-d3d
+github.com/kirides/go-d3d/com
+github.com/kirides/go-d3d/d3d11
+github.com/kirides/go-d3d/dxgi
+github.com/kirides/go-d3d/outputduplication
+github.com/kirides/go-d3d/outputduplication/swizzle
 # github.com/ncruces/go-sqlite3 v0.30.5
 ## explicit; go 1.24.0
 github.com/ncruces/go-sqlite3

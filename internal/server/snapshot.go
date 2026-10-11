@@ -44,6 +44,8 @@ type PCView struct {
 	Session  *SessionView `json:"session"`
 	// State summarises the tile colour: offline | free | busy | paused | checkout | staff
 	State string `json:"state"`
+	// NextBooking marks an upcoming reservation on a free PC ("Booked 19:00 — Merdan").
+	NextBooking *BookingMark `json:"nextBooking,omitempty"`
 }
 
 // Snapshot is everything the admin panel needs, pushed on every change.
@@ -90,6 +92,7 @@ func (s *Server) BuildSnapshot() (*Snapshot, error) {
 	for i := range open {
 		byPC[open[i].PCID] = &open[i]
 	}
+	marks := s.nextBookingMarks(now)
 	snap := &Snapshot{ServerTime: now, Version: Version, Settings: settings, Zones: zones, Packages: pkgs,
 		Shift: shift, Alerts: s.recentAlerts(30), PCs: make([]PCView, 0, len(pcs))}
 	for _, pc := range pcs {
@@ -118,6 +121,9 @@ func (s *Server) BuildSnapshot() (*Snapshot, error) {
 			v.Session = sv
 		}
 		v.State = tileState(v)
+		if v.Session == nil {
+			v.NextBooking = marks[pc.ID] // only show a reservation marker on a free PC
+		}
 		snap.PCs = append(snap.PCs, v)
 	}
 	return snap, nil

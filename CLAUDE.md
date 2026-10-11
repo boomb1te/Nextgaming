@@ -23,8 +23,28 @@ Always run both `go vet ./...` and `GOOS=windows go vet ./...`: many files are `
 - **Agent ↔ server**: TCP, one JSON `protocol.Envelope` per line (`internal/protocol`).
   The server pushes a full `DesiredState` (durations, never wall-clock times) on every
   change and on reconnect. Agents send `Heartbeat` every 3 s; 12 s of silence = offline.
-- **Agent ↔ lock screen**: HTTP on 127.0.0.1 (`GET /state`, `POST /logout` with header
-  `X-NextGaming-Client: 1`). The lock screen polls every 500 ms and **fails closed**.
+- **Agent ↔ lock screen**: HTTP on 127.0.0.1 (`GET /state`, `POST /logout`, and for screen
+  monitoring `GET /capture-wait` long-poll + `POST /screen`, all with header
+  `X-NextGaming-Client: 1`). The lock screen polls `/state` every 500 ms and **fails closed**.
+- **Screen monitoring**: the server broadcasts `TypeCapture` to all online PCs on a shared
+  tick only while an admin watches the Screens tab (`internal/server/screens.go`). The agent
+  wakes `/capture-wait`; a capture helper — `nextgaming-client.exe -capture`, which the agent
+  runs **as the logged-in user** (a SYSTEM process's GDI grab is black), separate from the
+  SYSTEM lock screen — grabs the screen and posts a JPEG, relayed as `TypeScreenFrame` and
+  served from `GET /api/pcs/{id}/screen.jpg`. Frames can be a few hundred KB, so
+  `protocol.MaxLine` is 8 MB. The lock-screen process no longer captures. Capture is
+  DXGI Desktop Duplication (captures borderless games, follows resolution) with a GDI
+  fallback (`cmd/nextgaming-client/capture_dxgi_windows.go`, `capture_windows.go`). The
+  panel's CSP allows `blob:` images because frames are shown via `URL.createObjectURL`.
+- **File sharing (LAN only)**: a **Files** tab. The front desk browses its own
+  filesystem (`ListLocal`); each gaming PC exposes one fixed shared folder
+  (`platform.DefaultSharedDir`, `C:\NextGaming\Shared`), listed over the control
+  channel (`TypeFSList`). File bytes move over a direct HTTP request between the
+  agent and the server, keyed by the club key (`X-NextGaming-Agent`) + a one-time
+  token (`/api/fs/serve/{token}` to the PC, `/api/fs/recv/{token}` from it), so a
+  big copy never blocks heartbeats/screens. `internal/agent/fs.go` enforces
+  containment (no `..`/symlink/absolute escape); `internal/server/fs.go` +
+  `transfers.go` drive it. Never expose this in any future online build.
 - **Admin panel**: `internal/server/web`, plain JS, no build step, embedded with `go:embed`.
   JSON API under `/api`, snapshots over SSE at `/api/events`. State-changing requests need
   the header `X-NextGaming: 1` (CSRF guard).
@@ -57,6 +77,8 @@ real Wake-on-LAN test, `harden-gamer-account.ps1`. Test on one club PC before ro
 ## Dependencies
 
 `github.com/ncruces/go-sqlite3` (SQLite compiled to WebAssembly, run by wazero: pure Go,
-cross-compiles, no DLL) and `golang.org/x/sys`. They are vendored in `vendor/`. There is no
+cross-compiles, no DLL), `golang.org/x/sys`, and `github.com/kirides/go-d3d` (DXGI Desktop
+Duplication for the Screens tab — only its CGO-free core packages are vendored; its
+examples/mjpeg deps are not). They are vendored in `vendor/`. There is no
 `go.sum` in the repo on purpose; if you change dependencies, run `go mod tidy && go mod vendor`
 with normal internet access and commit the new `go.sum` and `vendor/`.

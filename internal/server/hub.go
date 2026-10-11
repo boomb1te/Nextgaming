@@ -216,6 +216,14 @@ func (h *Hub) serve(ctx context.Context, raw net.Conn) {
 			if a, err := protocol.Decode[protocol.Ack](env); err == nil {
 				ac.resolve(env.ID, a)
 			}
+		case protocol.TypeScreenFrame:
+			if fr, err := protocol.Decode[protocol.ScreenFrame](env); err == nil {
+				h.srv.screens.store(pc.ID, fr.Data, fr.W, fr.H, time.Now())
+			}
+		case protocol.TypeFSResult:
+			if res, err := protocol.Decode[protocol.FSResult](env); err == nil {
+				h.srv.transfers.agentDone(res)
+			}
 		case protocol.TypeStaffLogin:
 			if sl, err := protocol.Decode[protocol.StaffLogin](env); err == nil {
 				go func(id string) {
@@ -265,11 +273,18 @@ func (h *Hub) Send(pcID int64, typ string, v any) error {
 
 // Command sends a message and waits for the agent's acknowledgement.
 func (h *Hub) Command(pcID int64, typ string, v any, timeout time.Duration) error {
+	_, err := h.Query(pcID, typ, v, timeout)
+	return err
+}
+
+// Query sends a message, waits for the acknowledgement and returns it, so a
+// command can carry a payload back (e.g. a folder listing in Ack.Data).
+func (h *Hub) Query(pcID int64, typ string, v any, timeout time.Duration) (protocol.Ack, error) {
 	h.mu.RLock()
 	ac := h.conns[pcID]
 	h.mu.RUnlock()
 	if ac == nil {
-		return ErrOffline
+		return protocol.Ack{}, ErrOffline
 	}
 	id := strconv.FormatInt(h.cmdSeq.Add(1), 10)
 	ch := make(chan protocol.Ack, 1)
@@ -278,7 +293,7 @@ func (h *Hub) Command(pcID int64, typ string, v any, timeout time.Duration) erro
 	ac.pmu.Unlock()
 	if err := ac.conn.Send(typ, id, v); err != nil {
 		ac.resolve(id, protocol.Ack{})
-		return err
+		return protocol.Ack{}, err
 	}
 	select {
 	case a := <-ch:
@@ -286,14 +301,14 @@ func (h *Hub) Command(pcID int64, typ string, v any, timeout time.Duration) erro
 			if a.Error == "" {
 				a.Error = "command failed"
 			}
-			return errors.New(a.Error)
+			return a, errors.New(a.Error)
 		}
-		return nil
+		return a, nil
 	case <-time.After(timeout):
 		ac.pmu.Lock()
 		delete(ac.pending, id)
 		ac.pmu.Unlock()
-		return errors.New("PC did not answer in time")
+		return protocol.Ack{}, errors.New("PC did not answer in time")
 	}
 }
 
@@ -311,6 +326,17 @@ func (h *Hub) Runtime(pcID int64) Runtime {
 		rt.ClientAlive = hb.ClientAlive
 	}
 	return rt
+}
+
+// OnlineIDs lists the PCs currently connected.
+func (h *Hub) OnlineIDs() []int64 {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]int64, 0, len(h.conns))
+	for id := range h.conns {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // Online reports whether a PC is connected.

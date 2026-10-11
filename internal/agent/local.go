@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -35,6 +37,45 @@ func (a *Agent) serveLocal(ctx context.Context) error {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 			return
 		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	})
+	// Screen monitoring. The lock screen long-polls /capture-wait; when the
+	// server asks for a frame the poll returns the size/quality to use. The
+	// lock screen grabs the screen and posts the JPEG to /screen.
+	mux.HandleFunc("GET /capture-wait", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-NextGaming-Client") != "1" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		a.capMu.Lock()
+		wake := a.capWake
+		a.capMu.Unlock()
+		select {
+		case <-wake:
+		case <-r.Context().Done():
+			return
+		case <-time.After(30 * time.Second):
+			w.WriteHeader(http.StatusNoContent) // no request; the client polls again
+			return
+		}
+		a.capMu.Lock()
+		resp := map[string]int{"seq": int(a.capSeq), "width": a.capW, "quality": a.capQ}
+		a.capMu.Unlock()
+		writeJSON(w, http.StatusOK, resp)
+	})
+	mux.HandleFunc("POST /screen", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-NextGaming-Client") != "1" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 6<<20))
+		if err != nil || len(data) == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		cw, _ := strconv.Atoi(r.URL.Query().Get("w"))
+		ch, _ := strconv.Atoi(r.URL.Query().Get("h"))
+		a.sendScreen(data, cw, ch)
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {

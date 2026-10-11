@@ -9,6 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,9 +37,10 @@ type env struct {
 	s      *Server
 	base   string
 	http   *http.Client
-	offset *atomic.Int64
-	agents []*agent.Agent
-	ports  []int
+	offset     *atomic.Int64
+	agents     []*agent.Agent
+	ports      []int
+	sharedDirs []string
 }
 
 func (e *env) advance(d time.Duration) { e.offset.Add(int64(d)) }
@@ -146,10 +150,12 @@ func setup(t *testing.T, nAgents int) *env {
 		ac.MachineID = fmt.Sprintf("test-pc-%d", i+1)
 		ac.LocalPort = freePort(t)
 		ac.ClientPath = "/nonexistent"
+		ac.SharedDir = filepath.Join(t.TempDir(), "shared") // isolate each PC's shared folder
 		ac.InstalledAt = time.Now()
 		a := agent.New(ac)
 		e.agents = append(e.agents, a)
 		e.ports = append(e.ports, ac.LocalPort)
+		e.sharedDirs = append(e.sharedDirs, ac.SharedDir)
 		go a.Run(ctx)
 		// Register in order so they are named PC 1, PC 2, ...
 		want := i + 1
@@ -528,4 +534,314 @@ func TestStaffLoginWire(t *testing.T) {
 	eventually(t, "PC unlocked by staff over the wire", func() bool {
 		return e.pc("PC 1").State == "staff" && !e.clientState(0).Locked
 	})
+}
+
+// Full screen-monitoring path: when the panel starts watching, the server asks
+// the agent for a frame; a stand-in for the lock screen (which only runs on
+// Windows) answers the agent's /capture-wait and posts a JPEG, which the panel
+// can then fetch from /api/pcs/{id}/screen.jpg.
+func TestScreenMonitoringWire(t *testing.T) {
+	e := setup(t, 1)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	pc := e.pc("PC 1")
+	local := fmt.Sprintf("http://127.0.0.1:%d", e.ports[0])
+	frame := []byte("\xff\xd8\xff\xe0JPEGBYTES\xff\xd9") // stand-in payload
+
+	// Stand in for the lock screen: long-poll the agent, then post a frame.
+	go func() {
+		for i := 0; i < 50; i++ {
+			req, _ := http.NewRequest("GET", local+"/capture-wait", nil)
+			req.Header.Set("X-NextGaming-Client", "1")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			code := resp.StatusCode
+			resp.Body.Close()
+			if code != 200 {
+				continue // 204 timeout: poll again
+			}
+			pr, _ := http.NewRequest("POST", local+"/screen?w=4&h=2", bytes.NewReader(frame))
+			pr.Header.Set("X-NextGaming-Client", "1")
+			pr.Header.Set("Content-Type", "image/jpeg")
+			if rp, err := http.DefaultClient.Do(pr); err == nil {
+				rp.Body.Close()
+			}
+		}
+	}()
+
+	// Before watching, there is no frame.
+	if code, _ := e.getRaw(fmt.Sprintf("/api/pcs/%d/screen.jpg", pc.ID)); code != http.StatusNoContent {
+		t.Fatalf("expected 204 before watching, got %d", code)
+	}
+
+	// Start watching; the server should now drive captures.
+	e.must("POST", "/api/screens/state", map[string]any{"watching": true}, nil)
+	eventually(t, "a frame arrives", func() bool {
+		code, body := e.getRaw(fmt.Sprintf("/api/pcs/%d/screen.jpg", pc.ID))
+		return code == 200 && bytes.Equal(body, frame)
+	})
+
+	// Stop watching; the stored frame goes stale and is no longer served.
+	e.must("POST", "/api/screens/state", map[string]any{"watching": false}, nil)
+}
+
+// Frames must keep updating tick after tick, not freeze on the first one.
+// This mirrors the real helper loop: long-poll /capture-wait, post a NEW frame,
+// repeat — and checks the server serves each new frame in turn.
+func TestScreenMonitoringKeepsUpdating(t *testing.T) {
+	e := setup(t, 1)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	pc := e.pc("PC 1")
+	local := fmt.Sprintf("http://127.0.0.1:%d", e.ports[0])
+
+	e.must("POST", "/api/screens/state", map[string]any{"watching": true}, nil)
+
+	for round := 1; round <= 4; round++ {
+		// Long-poll until the server asks for a capture (keeping watching alive).
+		got := false
+		for try := 0; try < 60 && !got; try++ {
+			e.getRaw(fmt.Sprintf("/api/pcs/%d/screen.jpg", pc.ID)) // keepAlive
+			req, _ := http.NewRequest("GET", local+"/capture-wait", nil)
+			req.Header.Set("X-NextGaming-Client", "1")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			code := resp.StatusCode
+			resp.Body.Close()
+			if code != 200 {
+				continue
+			}
+			got = true
+		}
+		if !got {
+			t.Fatalf("round %d: never got a capture request from the server", round)
+		}
+		frame := []byte(fmt.Sprintf("\xff\xd8\xff\xe0FRAME-%d\xff\xd9", round))
+		pr, _ := http.NewRequest("POST", local+"/screen?w=4&h=2", bytes.NewReader(frame))
+		pr.Header.Set("X-NextGaming-Client", "1")
+		pr.Header.Set("Content-Type", "image/jpeg")
+		if rp, err := http.DefaultClient.Do(pr); err == nil {
+			rp.Body.Close()
+		}
+		eventually(t, fmt.Sprintf("round %d frame served", round), func() bool {
+			code, body := e.getRaw(fmt.Sprintf("/api/pcs/%d/screen.jpg", pc.ID))
+			return code == 200 && bytes.Equal(body, frame)
+		})
+	}
+}
+
+func TestClientsAndGroups(t *testing.T) {
+	e := setup(t, 0)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+
+	// name + phone required
+	if err := e.call("POST", "/api/clients", map[string]string{"name": "", "phone": "123"}, nil); err == nil {
+		t.Fatal("client without a name should be rejected")
+	}
+	if err := e.call("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": ""}, nil); err == nil {
+		t.Fatal("client without a phone should be rejected")
+	}
+
+	// create two clients; names/phones may repeat
+	var c1, c2 struct{ ID int64 }
+	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "555-1", "note": "VIP"}, &c1)
+	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "555-1"}, &c2) // duplicate allowed
+	if c1.ID == 0 || c2.ID == 0 || c1.ID == c2.ID {
+		t.Fatalf("expected two distinct clients, got %d and %d", c1.ID, c2.ID)
+	}
+
+	// search by phone
+	var found []core.Client
+	e.must("GET", "/api/clients?q=555-1", nil, &found)
+	if len(found) != 2 {
+		t.Fatalf("search by phone returned %d, want 2", len(found))
+	}
+
+	// group needs at least one member
+	if err := e.call("POST", "/api/groups", map[string]any{"name": "Team A", "memberIds": []int64{}}, nil); err == nil {
+		t.Fatal("empty group should be rejected")
+	}
+	var g struct{ ID int64 }
+	e.must("POST", "/api/groups", map[string]any{"name": "Team A", "memberIds": []int64{c1.ID}}, &g)
+
+	// add the second member, then removing down to one is fine, but not to zero
+	e.must("POST", fmt.Sprintf("/api/groups/%d/members", g.ID), map[string]int64{"clientId": c2.ID}, nil)
+	var grp core.ClientGroup
+	e.must("GET", fmt.Sprintf("/api/groups/%d", g.ID), nil, &grp)
+	if len(grp.Members) != 2 {
+		t.Fatalf("group has %d members, want 2", len(grp.Members))
+	}
+	e.must("DELETE", fmt.Sprintf("/api/groups/%d/members/%d", g.ID, c2.ID), nil, nil)
+	if err := e.call("DELETE", fmt.Sprintf("/api/groups/%d/members/%d", g.ID, c1.ID), nil, nil); err == nil {
+		t.Fatal("removing the last member should be rejected")
+	}
+
+	// deleting a client drops it from groups and from the list
+	e.must("DELETE", fmt.Sprintf("/api/clients/%d", c2.ID), nil, nil)
+	e.must("GET", "/api/clients", nil, &found)
+	for _, c := range found {
+		if c.ID == c2.ID {
+			t.Fatal("deleted client still listed")
+		}
+	}
+}
+
+func TestBookings(t *testing.T) {
+	e := setup(t, 1)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	var c struct{ ID int64 }
+	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "555-9"}, &c)
+	pc := e.pc("PC 1")
+	now := e.s.now()
+
+	// validation: need a client or group, and PCs
+	if err := e.call("POST", "/api/bookings", map[string]any{"start": now.Unix(), "end": now.Add(time.Hour).Unix(), "pcIds": []int64{pc.ID}}, nil); err == nil {
+		t.Fatal("booking with no client/group should be rejected")
+	}
+
+	// a FUTURE booking shows a tile marker on the free PC
+	fStart := now.Add(2 * time.Hour)
+	var r1 BookingResult
+	e.must("POST", "/api/bookings", map[string]any{"clientId": c.ID, "start": fStart.Unix(), "end": fStart.Add(time.Hour).Unix(), "pcIds": []int64{pc.ID}}, &r1)
+	if r1.Booking == nil {
+		t.Fatalf("future booking not created (conflicts=%v)", r1.Conflicts)
+	}
+	eventually(t, "tile shows the booking marker", func() bool {
+		p := e.pc("PC 1")
+		return p.NextBooking != nil && p.NextBooking.Who == "Merdan"
+	})
+
+	// overlapping that window on the same PC warns (no force) and does not save
+	var r2 BookingResult
+	e.must("POST", "/api/bookings", map[string]any{"clientId": c.ID, "start": fStart.Add(30 * time.Minute).Unix(), "end": fStart.Add(90 * time.Minute).Unix(), "pcIds": []int64{pc.ID}}, &r2)
+	if r2.Booking != nil || len(r2.Conflicts) == 0 {
+		t.Fatalf("overlap should warn, got booking=%v conflicts=%d", r2.Booking, len(r2.Conflicts))
+	}
+	// forcing it through saves anyway
+	var r3 BookingResult
+	e.must("POST", "/api/bookings", map[string]any{"clientId": c.ID, "force": true, "start": fStart.Add(30 * time.Minute).Unix(), "end": fStart.Add(90 * time.Minute).Unix(), "pcIds": []int64{pc.ID}}, &r3)
+	if r3.Booking == nil {
+		t.Fatal("forced overlapping booking should save")
+	}
+	e.must("POST", fmt.Sprintf("/api/bookings/%d/cancel", r3.Booking.ID), nil, nil)
+
+	// a DUE booking auto-starts an open session on the PC
+	var r4 BookingResult
+	e.must("POST", "/api/bookings", map[string]any{"clientId": c.ID, "force": true, "start": now.Unix(), "end": now.Add(time.Hour).Unix(), "pcIds": []int64{pc.ID}}, &r4)
+	bid := r4.Booking.ID
+	eventually(t, "booking auto-starts an open session", func() bool {
+		p := e.pc("PC 1")
+		return p.State == "busy" && p.Session != nil && p.Session.mode() == "open" && !e.clientState(0).Locked
+	})
+
+	// release as no-show frees the PC
+	e.must("POST", fmt.Sprintf("/api/bookings/%d/noshow", bid), nil, nil)
+	eventually(t, "no-show frees the PC", func() bool { return e.pc("PC 1").State == "free" })
+}
+
+// mode returns the session mode as a string (small test helper).
+func (v *SessionView) mode() string { return string(v.Mode) }
+
+// getRaw fetches a path and returns the status code and raw body (for images).
+func (e *env) getRaw(path string) (int, []byte) {
+	e.t.Helper()
+	req, _ := http.NewRequest("GET", e.base+path, nil)
+	req.Header.Set("X-NextGaming", "1")
+	resp, err := e.http.Do(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b
+}
+
+func TestFileSharing(t *testing.T) {
+	e := setup(t, 1)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	pc := e.pc("PC 1")
+	shared := e.sharedDirs[0]
+
+	// --- Send a file from the front desk into the PC's shared folder ---
+	deskDir := t.TempDir()
+	src := filepath.Join(deskDir, "install.txt")
+	content := []byte("hello from the front desk")
+	if err := os.WriteFile(src, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.must("POST", "/api/fs/send", map[string]any{"pcId": pc.ID, "srcPath": src, "destRel": ""}, nil)
+	eventually(t, "file arrives in the PC shared folder", func() bool {
+		b, err := os.ReadFile(filepath.Join(shared, "install.txt"))
+		return err == nil && bytes.Equal(b, content)
+	})
+
+	// It shows in the PC's shared-folder listing over the control channel.
+	var listing protocol.FSListing
+	e.must("GET", fmt.Sprintf("/api/fs/pc/%d?rel=", pc.ID), nil, &listing)
+	if len(listing.Entries) != 1 || listing.Entries[0].Name != "install.txt" {
+		t.Fatalf("PC shared listing = %+v", listing.Entries)
+	}
+
+	// The front-desk filesystem is browsable: the source folder lists our file.
+	var local LocalListing
+	e.must("GET", "/api/fs/local?path="+url.QueryEscape(deskDir), nil, &local)
+	if !hasEntry(local.Entries, "install.txt") {
+		t.Fatalf("local listing missing install.txt: %+v", local.Entries)
+	}
+
+	// --- Get a file from the PC's shared folder back to the front desk ---
+	pulled := []byte("a save file from the gaming PC")
+	if err := os.WriteFile(filepath.Join(shared, "save.dat"), pulled, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recvDir := t.TempDir()
+	e.must("POST", "/api/fs/get", map[string]any{"pcId": pc.ID, "srcRel": "", "name": "save.dat", "destDir": recvDir}, nil)
+	eventually(t, "file arrives on the front desk", func() bool {
+		b, err := os.ReadFile(filepath.Join(recvDir, "save.dat"))
+		return err == nil && bytes.Equal(b, pulled)
+	})
+
+	// Both transfers are recorded as done.
+	eventually(t, "two transfers finish", func() bool {
+		var tfs []transfer
+		if e.call("GET", "/api/fs/transfers", nil, &tfs) != nil || len(tfs) != 2 {
+			return false
+		}
+		for _, tf := range tfs {
+			if tf.Status != tfDone {
+				return false
+			}
+		}
+		return true
+	})
+
+	// --- The shared folder cannot be escaped: ".." resolves back to the root,
+	// never a parent directory, so it still shows only our shared file. ---
+	var esc protocol.FSListing
+	e.must("GET", fmt.Sprintf("/api/fs/pc/%d?rel=%s", pc.ID, url.QueryEscape("../../..")), nil, &esc)
+	for _, en := range esc.Entries {
+		if en.Name != "install.txt" && en.Name != "save.dat" {
+			t.Fatalf("path traversal leaked an entry: %q", en.Name)
+		}
+	}
+
+	// A transfer to an offline PC fails cleanly.
+	e.must("DELETE", fmt.Sprintf("/api/pcs/%d", pc.ID), nil, nil)
+	eventually(t, "PC goes offline", func() bool { return !e.s.hub.Online(pc.ID) })
+	if err := e.call("POST", "/api/fs/send", map[string]any{"pcId": pc.ID, "srcPath": src, "destRel": ""}, nil); err == nil {
+		t.Fatal("sending to an offline PC should fail")
+	}
+}
+
+func hasEntry(es []localEntry, name string) bool {
+	for _, e := range es {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
 }

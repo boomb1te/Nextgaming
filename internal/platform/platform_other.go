@@ -18,6 +18,9 @@ const Simulated = true
 // DefaultDataDir is ./nextgaming-agent-data outside Windows.
 func DefaultDataDir() string { return "nextgaming-agent-data" }
 
+// DefaultSharedDir is ./nextgaming-agent-data/shared outside Windows.
+func DefaultSharedDir() string { return filepath.Join("nextgaming-agent-data", "shared") }
+
 // GetInventory identifies this machine. NEXTGAMING_MACHINE_ID overrides the
 // ID so several simulated agents can run on one development machine.
 func GetInventory(dataDir string) Inventory {

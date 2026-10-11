@@ -32,10 +32,12 @@ const (
 	// agent -> server
 	TypeHello      = "hello"
 	TypeHeartbeat  = "heartbeat"
-	TypeWoLReport  = "wol_report"
-	TypeEvent      = "event"
-	TypeAck        = "ack"
-	TypeStaffLogin = "staff_login" // agent -> server: unlock this PC for staff after a password
+	TypeWoLReport   = "wol_report"
+	TypeEvent       = "event"
+	TypeAck         = "ack"
+	TypeStaffLogin  = "staff_login"  // agent -> server: unlock this PC for staff after a password
+	TypeScreenFrame = "screen_frame" // agent -> server: a captured screen thumbnail
+	TypeFSResult    = "fs_result"    // agent -> server: a file transfer finished
 
 	// server -> agent
 	TypeWelcome   = "welcome"
@@ -46,6 +48,10 @@ const (
 	TypeRestart   = "restart"
 	TypeWoLCheck  = "wol_check"
 	TypeUninstall = "uninstall" // the PC was removed in the admin panel
+	TypeCapture   = "capture"   // capture one screen frame now (screen monitoring)
+	TypeFSList    = "fs_list"   // list the PC's shared folder (reply carries the listing in the Ack)
+	TypeFSPush    = "fs_push"   // download a file from the server into the shared folder
+	TypeFSPull    = "fs_pull"   // upload a file from the shared folder to the server
 )
 
 // RejectRemoved is the Reject reason for a PC that was removed in the admin panel.
@@ -148,10 +154,71 @@ type Message struct {
 	Text string `json:"text"`
 }
 
-// Ack answers a command that has an ID.
+// Ack answers a command that has an ID. Data carries an optional payload for
+// commands that return something (e.g. a folder listing for TypeFSList).
 type Ack struct {
+	OK    bool            `json:"ok"`
+	Error string          `json:"error,omitempty"`
+	Data  json.RawMessage `json:"data,omitempty"`
+}
+
+// ---- file sharing (LAN only) ----
+//
+// Each gaming PC exposes exactly one fixed "shared" folder; the agent never
+// reveals anything outside it. Directory listings travel on this control
+// connection (small JSON); the file bytes themselves move over a separate HTTP
+// request between the agent and the server, so a large transfer never blocks
+// heartbeats or screen frames.
+
+// FSListRequest asks the agent to list a folder inside its shared folder.
+// Rel is a path relative to the shared root ("" = the root); the agent rejects
+// anything that would escape the shared folder.
+type FSListRequest struct {
+	Rel string `json:"rel"`
+}
+
+// FSEntry is one item in a shared-folder listing.
+type FSEntry struct {
+	Name    string `json:"name"`
+	IsDir   bool   `json:"isDir"`
+	Size    int64  `json:"size"`
+	ModUnix int64  `json:"modUnix"`
+}
+
+// FSListing is the agent's reply to FSListRequest (carried in Ack.Data).
+type FSListing struct {
+	Rel     string    `json:"rel"`
+	Entries []FSEntry `json:"entries"`
+}
+
+// FSPush tells the agent to download one file from the server into its shared
+// folder. The agent GETs http://<server>:<Port><Path>, authenticating with the
+// club key, and saves the body as Rel/Name inside the shared folder.
+type FSPush struct {
+	Token string `json:"token"`
+	Port  int    `json:"port"`
+	Path  string `json:"path"`
+	Rel   string `json:"rel"`  // destination subfolder within shared ("" = root)
+	Name  string `json:"name"` // destination file name
+	Size  int64  `json:"size"`
+}
+
+// FSPull tells the agent to upload one file from its shared folder to the
+// server. The agent POSTs the file at Rel/Name to http://<server>:<Port><Path>.
+type FSPull struct {
+	Token string `json:"token"`
+	Port  int    `json:"port"`
+	Path  string `json:"path"`
+	Rel   string `json:"rel"`  // source subfolder within shared ("" = root)
+	Name  string `json:"name"` // source file name
+}
+
+// FSResult is the agent's report that a transfer finished (or failed).
+type FSResult struct {
+	Token string `json:"token"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+	Bytes int64  `json:"bytes"`
 }
 
 // StaffLogin is sent by the agent when staff enter their password on the lock
@@ -160,6 +227,23 @@ type Ack struct {
 type StaffLogin struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+// CaptureRequest tells the agent to have the lock screen grab one frame of the
+// screen, downscaled to Width pixels wide and JPEG-encoded at Quality (1–100).
+// The server broadcasts it to every online PC on a shared tick, so all PCs
+// capture at the same moment while the monitoring tab is open.
+type CaptureRequest struct {
+	Width   int `json:"width"`
+	Quality int `json:"quality"`
+}
+
+// ScreenFrame is one captured screen, relayed agent -> server. Data is a JPEG
+// (base64 on the wire). W and H are the encoded pixel size.
+type ScreenFrame struct {
+	Data []byte `json:"data"`
+	W    int    `json:"w"`
+	H    int    `json:"h"`
 }
 
 // WoLCheck asks the agent to check (and optionally fix) its Wake-on-LAN setup.
@@ -195,7 +279,9 @@ type WoLReport struct {
 // ---- wire helpers ----
 
 // MaxLine bounds a single message so a broken peer cannot exhaust memory.
-const MaxLine = 1 << 20
+// It must comfortably fit a JPEG screen frame (base64-encoded) from the
+// focused-PC view, which can run to a few hundred KB.
+const MaxLine = 8 << 20
 
 // Encode builds an Envelope.
 func Encode(typ, id string, v any) (Envelope, error) {

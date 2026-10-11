@@ -39,6 +39,7 @@ const (
 	idPass   = 102
 	idLogin  = 103
 	idCancel = 104
+	idStaff  = 105
 )
 
 // Colours.
@@ -88,6 +89,7 @@ type app struct {
 	passEdit   uintptr
 	loginBtn   uintptr
 	cancelBtn  uintptr
+	staffBtn   uintptr
 	loginLabel string
 	loginErr   string
 }
@@ -104,7 +106,17 @@ var hookLoginMode = false
 func main() {
 	runtime.LockOSThread()
 	port := flag.Int("port", protocol.DefaultClientPort, "agent local port")
+	captureMode := flag.Bool("capture", false, "run only as the screen-capture helper (started by the agent as the logged-in user)")
 	flag.Parse()
+
+	// Capture-only helper: no window, no keyboard hook, no single-instance lock.
+	// It runs as the logged-in user (GDI capture from a SYSTEM process is black),
+	// alongside the real lock screen which stays SYSTEM.
+	if *captureMode {
+		w.SetDPIAware()
+		(&app{port: *port}).captureLoop()
+		return
+	}
 
 	if !w.SingleInstance(`Local\NextGamingClient`) {
 		os.Exit(0)
@@ -151,6 +163,9 @@ func main() {
 	a.applyLock(true)
 	w.SetTimer(a.lockWnd, timerTick, 500)
 	go a.poll()
+	// Screen capture runs in a separate helper (started by the agent as the
+	// logged-in user), not here: this process may be SYSTEM, whose GDI screen
+	// grab comes back black.
 
 	var m w.MSG
 	for w.GetMessage(&m) {
@@ -186,6 +201,46 @@ func (a *app) poll() {
 		}
 		w.PostMessage(a.lockWnd, msgState, 0, 0)
 		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// captureLoop long-polls the agent for a screen-capture request (made only
+// while an admin is watching the Screens tab), grabs the primary monitor and
+// posts the JPEG back. It idles with no cost when nobody is watching.
+func (a *app) captureLoop() {
+	base := fmt.Sprintf("http://127.0.0.1:%d", a.port)
+	waitClient := &http.Client{Timeout: 35 * time.Second}
+	postClient := &http.Client{Timeout: 10 * time.Second}
+	cap := newScreenCapturer()
+	defer cap.close()
+	for {
+		req, _ := http.NewRequest("GET", base+"/capture-wait", nil)
+		req.Header.Set("X-NextGaming-Client", "1")
+		resp, err := waitClient.Do(req)
+		if err != nil {
+			time.Sleep(time.Second)
+			continue
+		}
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			continue // 204: no request this round, poll again
+		}
+		var cmd struct{ Seq, Width, Quality int }
+		json.NewDecoder(resp.Body).Decode(&cmd)
+		resp.Body.Close()
+		if cmd.Width <= 0 {
+			continue
+		}
+		data, cw, ch, err := cap.jpeg(cmd.Width, cmd.Quality)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		pr, _ := http.NewRequest("POST", fmt.Sprintf("%s/screen?w=%d&h=%d", base, cw, ch), bytes.NewReader(data))
+		pr.Header.Set("X-NextGaming-Client", "1")
+		pr.Header.Set("Content-Type", "image/jpeg")
+		if rp, err := postClient.Do(pr); err == nil {
+			rp.Body.Close()
+		}
 	}
 }
 
@@ -256,8 +311,13 @@ func (a *app) applyLock(locked bool) {
 		w.SetWindowPos(a.lockWnd, w.HWND_TOPMOST, 0, 0, 0, 0, w.SWP_NOMOVE|w.SWP_NOSIZE|w.SWP_SHOWWINDOW)
 		w.ForceForeground(a.lockWnd)
 		a.lastForce = time.Now()
+		if !a.loginMode {
+			a.placeStaffButton()
+			w.ShowChild(a.staffBtn, true)
+		}
 	} else {
 		a.hideLogin()
+		w.ShowChild(a.staffBtn, false)
 		w.ShowWindow(a.lockWnd, w.SW_HIDE)
 		w.Taskbar(true)
 		w.ShowWindow(a.overlayWnd, w.SW_SHOWNOACTIVATE)
@@ -282,6 +342,19 @@ func (a *app) createLoginControls() {
 		w.SetControlFont(c, font)
 		w.ShowChild(c, false)
 	}
+	// Always-visible "Staff log in" button on the lock screen (opens the box).
+	a.staffBtn = w.CreateChild(a.lockWnd, "BUTTON", "Staff log in", w.WS_TABSTOP, 0, 0, 10, 10, idStaff)
+	w.SetControlFont(a.staffBtn, font)
+	w.ShowChild(a.staffBtn, false)
+}
+
+// placeStaffButton centres the staff button near the bottom of the primary monitor.
+func (a *app) placeStaffButton() {
+	ox := -w.GetSystemMetrics(w.SM_XVIRTUALSCREEN)
+	oy := -w.GetSystemMetrics(w.SM_YVIRTUALSCREEN)
+	sw, sh := w.GetSystemMetrics(w.SM_CXSCREEN), w.GetSystemMetrics(w.SM_CYSCREEN)
+	bw, bh := a.px(220), a.px(48)
+	w.MoveControl(a.staffBtn, int32(ox)+(sw-bw)/2, int32(oy)+sh-sh/6, bw, bh)
 }
 
 // placeLoginControls lays the box out centered on the primary monitor.
@@ -308,6 +381,7 @@ func (a *app) showLogin() {
 	a.loginMode = true
 	hookLoginMode = true
 	a.loginMsg = ""
+	w.ShowChild(a.staffBtn, false)
 	a.placeLoginControls()
 	w.SetText(a.userEdit, "")
 	w.SetText(a.passEdit, "")
@@ -329,6 +403,10 @@ func (a *app) hideLogin() {
 	a.loginMsg = ""
 	for _, c := range []uintptr{a.userEdit, a.passEdit, a.loginBtn, a.cancelBtn} {
 		w.ShowChild(c, false)
+	}
+	if a.locked {
+		a.placeStaffButton()
+		w.ShowChild(a.staffBtn, true)
 	}
 	w.SetFocus(a.lockWnd)
 	w.InvalidateRect(a.lockWnd)
@@ -426,11 +504,17 @@ func wndProc(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
 		}
 		return 0
 	case w.WM_COMMAND:
-		if a.loginMode {
-			switch w.LoWord(wp) {
-			case idLogin:
+		switch w.LoWord(wp) {
+		case idStaff:
+			if !a.loginMode {
+				a.showLogin()
+			}
+		case idLogin:
+			if a.loginMode {
 				a.doLogin()
-			case idCancel:
+			}
+		case idCancel:
+			if a.loginMode {
 				a.hideLogin()
 			}
 		}
@@ -619,10 +703,8 @@ func (a *app) paintLock(hwnd uintptr) {
 			p.Text(a.loginMsg, w.RECT{Left: panel.Left, Top: int32(oy) + sh/2 + a.px(60), Right: panel.Right, Bottom: int32(oy) + sh/2 + a.px(92)},
 				w.Font(a.px(14), w.FW_NORMAL), col, w.DT_CENTER|w.DT_SINGLELINE|w.DT_END_ELLIPSIS)
 		}
-	} else {
-		p.Text("Staff: press Ctrl+Alt+L to log in", w.RECT{Left: ox, Top: oy + sh - sh/10, Right: ox + sw, Bottom: oy + sh - sh/14},
-			w.Font(sh/70, w.FW_NORMAL), colMuted, w.DT_CENTER|w.DT_SINGLELINE)
 	}
+	// (The "Staff log in" button is a child control, drawn by Windows.)
 	p.Text("NextGaming", w.RECT{Left: ox, Top: oy + sh - sh/18, Right: ox + sw, Bottom: oy + sh}, w.Font(sh/60, w.FW_NORMAL), colMuted, w.DT_CENTER|w.DT_SINGLELINE)
 }
 

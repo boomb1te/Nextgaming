@@ -52,6 +52,20 @@ func (s *Server) routes() http.Handler {
 	h("GET /api/state", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) { return s.BuildSnapshot() })
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 
+	// Screen monitoring.
+	h("POST /api/screens/state", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct {
+			Watching bool  `json:"watching"`
+			Focus    int64 `json:"focus"`
+		}
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		s.screens.setWatch(req.Watching, req.Focus, s.now())
+		return ok(), nil
+	})
+	mux.HandleFunc("GET /api/pcs/{id}/screen.jpg", s.handleScreenJPEG)
+
 	h("POST /api/pcs/{id}/start", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		var req StartRequest
 		if err := decode(r, &req); err != nil {
@@ -261,6 +275,142 @@ func (s *Server) routes() http.Handler {
 		return s.AuditLog(r.URL.Query().Get("date"))
 	})
 
+	// Clients and groups (booking system). Any signed-in staff can manage them.
+	h("GET /api/clients", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return s.ListClients(r.URL.Query().Get("q"))
+	})
+	h("POST /api/clients", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct{ Name, Phone, Note string }
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		id, err := s.CreateClient(a.ID, req.Name, req.Phone, req.Note)
+		return map[string]int64{"id": id}, err
+	})
+	h("PUT /api/clients/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct{ Name, Phone, Note string }
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return ok(), s.UpdateClient(a.ID, pathID(r), req.Name, req.Phone, req.Note)
+	})
+	h("DELETE /api/clients/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return ok(), s.DeleteClient(a.ID, pathID(r))
+	})
+	h("GET /api/groups", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return s.ListGroups()
+	})
+	h("GET /api/groups/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return s.GetGroup(pathID(r))
+	})
+	h("POST /api/groups", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct {
+			Name, Note string
+			MemberIDs  []int64 `json:"memberIds"`
+		}
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		id, err := s.CreateGroup(a.ID, req.Name, req.Note, req.MemberIDs)
+		return map[string]int64{"id": id}, err
+	})
+	h("PUT /api/groups/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct{ Name, Note string }
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return ok(), s.UpdateGroup(a.ID, pathID(r), req.Name, req.Note)
+	})
+	h("DELETE /api/groups/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return ok(), s.DeleteGroup(a.ID, pathID(r))
+	})
+	h("POST /api/groups/{id}/members", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct {
+			ClientID int64 `json:"clientId"`
+		}
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return ok(), s.AddGroupMember(a.ID, pathID(r), req.ClientID)
+	})
+	h("DELETE /api/groups/{id}/members/{clientId}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		cid, _ := strconv.ParseInt(r.PathValue("clientId"), 10, 64)
+		return ok(), s.RemoveGroupMember(a.ID, pathID(r), cid)
+	})
+
+	// Bookings.
+	h("GET /api/bookings", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		from := parseUnix(r.URL.Query().Get("from"))
+		to := parseUnix(r.URL.Query().Get("to"))
+		if from.IsZero() {
+			from = s.now().Add(-12 * time.Hour)
+		}
+		if to.IsZero() {
+			to = from.Add(7 * 24 * time.Hour)
+		}
+		return s.ListBookings(from, to)
+	})
+	h("POST /api/bookings", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req BookingRequest
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return s.CreateBooking(a.ID, req)
+	})
+	h("PUT /api/bookings/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req BookingRequest
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return s.UpdateBooking(a.ID, pathID(r), req)
+	})
+	h("POST /api/bookings/{id}/cancel", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return ok(), s.CancelBooking(a.ID, pathID(r))
+	})
+	h("POST /api/bookings/{id}/noshow", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return ok(), s.ReleaseNoShow(a.ID, pathID(r))
+	})
+
+	// File sharing (LAN only). Browse the front-desk PC's own filesystem, list a
+	// gaming PC's single shared folder, and copy files either way. Any signed-in
+	// staff can use it, like messaging or power actions.
+	h("GET /api/fs/local", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return s.ListLocal(r.URL.Query().Get("path"))
+	})
+	h("GET /api/fs/pc/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return s.ListPCShared(pathID(r), r.URL.Query().Get("rel"))
+	})
+	h("POST /api/fs/send", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct {
+			PCID    int64  `json:"pcId"`
+			SrcPath string `json:"srcPath"`
+			DestRel string `json:"destRel"`
+		}
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return s.SendToPC(a.ID, req.PCID, req.SrcPath, req.DestRel)
+	})
+	h("POST /api/fs/get", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct {
+			PCID    int64  `json:"pcId"`
+			SrcRel  string `json:"srcRel"`
+			Name    string `json:"name"`
+			DestDir string `json:"destDir"`
+		}
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return s.GetFromPC(a.ID, req.PCID, req.SrcRel, req.Name, req.DestDir)
+	})
+	h("GET /api/fs/transfers", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return s.transfers.list(), nil
+	})
+	// Agent-facing byte channel: authenticated by the club key + a one-time
+	// token, never the admin cookie, so these are raw handlers (no CSRF, no login).
+	mux.HandleFunc("GET /api/fs/serve/{token}", s.handleFSServe)
+	mux.HandleFunc("POST /api/fs/recv/{token}", s.handleFSRecv)
+
 	h("GET /api/admins", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		return store.ListAdmins(s.st.DB)
 	})
@@ -304,7 +454,9 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+		// blob: is needed for the Screens tab: captured frames are fetched and
+		// shown via URL.createObjectURL (a blob: URL) on the <img>.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -314,6 +466,18 @@ func ok() map[string]bool { return map[string]bool{"ok": true} }
 func pathID(r *http.Request) int64 {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	return id
+}
+
+// parseUnix parses a unix-seconds query parameter; zero time if missing/invalid.
+func parseUnix(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(n, 0)
 }
 
 func decode(r *http.Request, v any) error {
@@ -476,6 +640,25 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1})
 	writeJSON(w, http.StatusOK, ok())
+}
+
+// handleScreenJPEG serves the latest captured frame for one PC. Pulling a
+// frame also keeps monitoring alive, so the grid refreshes even if a heartbeat
+// is lost. Returns 204 when there is no fresh frame.
+func (s *Server) handleScreenJPEG(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.currentAdmin(r); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "please log in"})
+		return
+	}
+	s.screens.keepAlive(s.now())
+	w.Header().Set("Cache-Control", "no-store")
+	f, ok := s.screens.get(pathID(r))
+	if !ok || len(f.data) == 0 || s.now().Sub(f.at) > screenStale {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Write(f.data)
 }
 
 // handleEvents streams snapshots to the admin panel (Server-Sent Events).

@@ -35,6 +35,17 @@ func DefaultDataDir() string {
 	return filepath.Join(pd, "NextGaming", "agent")
 }
 
+// DefaultSharedDir is the one folder on this PC that the front desk can read
+// and write over the LAN. It is a plain, easy-to-find path so staff can drop
+// files into it in Explorer.
+func DefaultSharedDir() string {
+	sd := os.Getenv("SystemDrive")
+	if sd == "" {
+		sd = "C:"
+	}
+	return filepath.Join(sd+`\`, "NextGaming", "Shared")
+}
+
 // powershell runs a script file and returns its stdout.
 func powershell(ctx context.Context, script string, args ...string) ([]byte, error) {
 	exe := filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")

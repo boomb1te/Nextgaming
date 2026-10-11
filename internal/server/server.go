@@ -24,11 +24,13 @@ var Version = "1.0.0"
 
 // Server is the running NextGaming server.
 type Server struct {
-	cfg    Config
-	st     *store.Store
-	hub    *Hub
-	logins *Sessions
-	bus    *Bus
+	cfg     Config
+	st      *store.Store
+	hub     *Hub
+	logins  *Sessions
+	bus       *Bus
+	screens   *screens
+	transfers *transfers
 
 	// mu serialises every state-changing operation so two admins clicking at
 	// once can never double-start a PC or double-charge a session.
@@ -43,6 +45,8 @@ type Server struct {
 
 	wolMu    sync.Mutex
 	wolTests map[int64]bool // PCs with a wake test in progress
+
+	wokenBookings map[int64]bool // bookings whose PCs we already pre-woke
 
 	now func() time.Time // replaceable in tests
 }
@@ -85,9 +89,11 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, st: st, logins: newSessions(), wolTests: map[int64]bool{}, now: time.Now}
+	s := &Server{cfg: cfg, st: st, logins: newSessions(), wolTests: map[int64]bool{}, wokenBookings: map[int64]bool{}, now: time.Now}
 	s.hub = newHub(s)
 	s.bus = newBus(s)
+	s.screens = newScreens()
+	s.transfers = newTransfers(s)
 	if s.settings, err = store.LoadSettings(st.DB); err != nil {
 		return nil, err
 	}
@@ -123,6 +129,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.bus.run(ctx)
 	go s.ticker(ctx)
 	go s.backupLoop(ctx)
+	go s.screenLoop(ctx)
 
 	select {
 	case <-ctx.Done():
@@ -195,6 +202,7 @@ func (s *Server) ticker(ctx context.Context) {
 			return
 		case <-t.C:
 			s.expireSessions()
+			s.processBookings(s.now())
 		case <-resync.C:
 			pcs, err := store.ListPCs(s.st.DB)
 			if err != nil {
@@ -373,6 +381,8 @@ func (s *Server) agentConnected(pcID int64) {
 }
 
 func (s *Server) agentDisconnected(pcID int64) {
+	s.screens.drop(pcID)
+	s.transfers.dropPC(pcID)
 	if s.wolTestRunning(pcID) {
 		s.changed()
 		return

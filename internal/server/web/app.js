@@ -7,6 +7,7 @@ const S = {
   me: null, snap: null, snapAt: 0, tab: 'pcs', live: false, es: null,
   seenAlert: -1, reportDate: todayISO(), auditDate: todayISO(),
   selecting: false, selected: new Set(),
+  screens: null, // live state of the Screens tab (see screens.js section)
 };
 
 // ---------- helpers ----------
@@ -58,6 +59,12 @@ function mins(m) {
   return hh ? (mm ? `${hh} h ${mm} min` : `${hh} h`) : `${mm} min`;
 }
 function priceFor(rate, minutes) { return minutes > 0 && rate > 0 ? Math.floor((rate * minutes + 30) / 60) : 0; }
+function fmtBytes(n) {
+  if (n < 0) return '—';
+  if (n < 1024) return n + ' B';
+  const u = ['KB', 'MB', 'GB', 'TB']; let i = -1; do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return (n < 10 ? n.toFixed(1) : Math.round(n)) + ' ' + u[i];
+}
 function timeStr(t) { const d = new Date(t); return isNaN(d) || d.getFullYear() < 2000 ? '—' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 function dateTimeStr(t) { const d = new Date(t); return isNaN(d) || d.getFullYear() < 2000 ? '—' : d.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }); }
 function isOwner() { return S.me && S.me.role === 'owner'; }
@@ -172,6 +179,7 @@ function renderSetup() {
 }
 
 function renderLogin() {
+  screensStop();
   if (S.es) { S.es.close(); S.es = null; }
   document.getElementById('modal-root').replaceChildren();
   const user = h('input', { type: 'text', autocomplete: 'username' });
@@ -228,11 +236,11 @@ function handleAlerts() {
 // ---------- shell ----------
 
 function renderShell() {
-  const tabs = [['pcs', 'PCs'], ['shift', 'Shift & cash'], ['reports', 'Reports'], ['log', 'Activity log'], ['settings', 'Settings']];
+  const tabs = [['pcs', 'PCs'], ['screens', 'Screens'], ['files', 'Files'], ['bookings', 'Bookings'], ['clients', 'Clients'], ['shift', 'Shift & cash'], ['reports', 'Reports'], ['log', 'Activity log'], ['settings', 'Settings']];
   document.getElementById('app').replaceChildren(
     h('header', { class: 'top', id: 'hdr' }),
     h('nav', { class: 'tabs' }, tabs.map(([id, label]) =>
-      h('button', { 'data-tab': id, class: S.tab === id ? 'on' : '', onclick: () => { S.tab = id; renderTabs(); render(); } }, label))),
+      h('button', { 'data-tab': id, class: S.tab === id ? 'on' : '', onclick: () => { switchTab(id); } }, label))),
     h('main', { id: 'main' }, h('p', { class: 'muted' }, 'Connecting…')));
 }
 
@@ -261,13 +269,21 @@ function render() {
   renderHeader();
   if (!S.snap) return;
   const main = document.getElementById('main');
+  if (S.tab !== 'screens') screensStop();
+  if (S.tab !== 'files') filesStop();
   // Keep forms on Settings/Shift/Reports stable while snapshots stream in.
   if (S.tab === 'pcs') main.replaceChildren(renderPCs());
   else if (main.dataset.tab !== S.tab) {
+    if (S.tab === 'screens') main.replaceChildren(renderScreens());
+    if (S.tab === 'files') main.replaceChildren(renderFiles());
+    if (S.tab === 'bookings') main.replaceChildren(renderBookings());
+    if (S.tab === 'clients') main.replaceChildren(renderClients());
     if (S.tab === 'shift') main.replaceChildren(renderShift());
     if (S.tab === 'reports') main.replaceChildren(renderReports());
     if (S.tab === 'log') main.replaceChildren(renderLog());
     if (S.tab === 'settings') main.replaceChildren(renderSettings());
+  } else if (S.tab === 'screens') {
+    screensReconcile();
   } else if (S.tab === 'shift') {
     const live = document.getElementById('shift-live');
     if (live) live.replaceChildren(shiftLive());
@@ -278,6 +294,9 @@ function render() {
 
 // Re-render only the view (used after actions on non-live tabs).
 function rerender() { const m = document.getElementById('main'); if (m) m.dataset.tab = ''; render(); }
+
+// switchTab changes the active tab and stops screen monitoring when leaving it.
+function switchTab(id) { S.tab = id; renderTabs(); render(); }
 
 // ---------- live timers ----------
 
@@ -359,6 +378,7 @@ function renderPCs() {
       h('div', { class: 'state' }, STATE_LABEL[pc.state] || pc.state),
       tileTimer(pc),
       h('div', { class: 'sub' }, tileSub(pc)),
+      pc.nextBooking ? h('div', { class: 'booked' }, `📅 Booked ${timeStr(pc.nextBooking.at)} — ${pc.nextBooking.who}`) : null,
       pc.runtime.online && !pc.runtime.clientAlive ? h('div', { class: 'warn' }, 'Lock screen not running') : null,
       !pc.runtime.online && pc.session ? h('div', { class: 'warn' }, 'Offline during session') : null);
   }));
@@ -379,6 +399,8 @@ function selectionBar(pcs) {
   const onlineSel = chosen().filter(p => p.runtime.online);
   const offlineSel = chosen().filter(p => !p.runtime.online);
   const withSession = chosen().filter(p => p.session);
+  const pausable = chosen().filter(p => p.session && p.session.status === 'active' && p.session.mode !== 'free');
+  const resumable = chosen().filter(p => p.session && p.session.status === 'paused');
 
   const bar = h('div', { class: 'card selbar' },
     h('div', { class: 'row' },
@@ -390,7 +412,10 @@ function selectionBar(pcs) {
   const actions = h('div', { class: 'row', style: 'margin-top:8px' },
     h('button', { class: 'btn primary', disabled: !freeOnline.length, onclick: () => startManyModal(freeOnline.map(p => p.id)) }, `Start session (${freeOnline.length} free)`),
     h('button', { class: 'btn', disabled: !onlineSel.length, onclick: () => messageManyModal(onlineSel.map(p => p.id)) }, 'Message'),
+    h('button', { class: 'btn', disabled: !pausable.length, onclick: e => runMany(e.target, 'Pause', pausable, p => api('POST', `/api/pcs/${p.id}/pause`)) }, `Pause${pausable.length ? ' (' + pausable.length + ')' : ''}`),
+    h('button', { class: 'btn', disabled: !resumable.length, onclick: e => runMany(e.target, 'Resume', resumable, p => api('POST', `/api/pcs/${p.id}/resume`)) }, `Resume${resumable.length ? ' (' + resumable.length + ')' : ''}`),
     h('button', { class: 'btn', disabled: !onlineSel.length, onclick: e => runMany(e.target, 'Lock', onlineSel, p => api('POST', `/api/pcs/${p.id}/lock`)) }, 'Lock'),
+    h('button', { class: 'btn primary', disabled: !withSession.length, onclick: () => endManyModal(withSession.map(p => p.id)) }, `End session${withSession.length ? ' (' + withSession.length + ')' : ''}`),
     h('button', { class: 'btn', disabled: !offlineSel.length, onclick: e => runMany(e.target, 'Wake', offlineSel, p => api('POST', `/api/pcs/${p.id}/wake`)) }, 'Wake'),
     h('button', { class: 'btn danger', disabled: !onlineSel.length, onclick: async e => {
       if (!await confirmBox('Shut down', `Shut down ${onlineSel.length} PC(s)? Any paid session is left running on the server.`, 'Shut down', true)) return;
@@ -725,6 +750,47 @@ async function endModal(id) {
   };
 }
 
+// endManyModal ends a selection of sessions at once. It previews what each PC
+// collects (open sessions) and the grand total, then ends them all on confirm.
+// Prepaid sessions are closed with no refund (settle those individually first
+// if a refund is due). The server recomputes money at end time, so the preview
+// is "as of now".
+async function endManyModal(ids) {
+  const list = ids.map(pcById).filter(p => p && p.session);
+  if (!list.length) { toast('No sessions to end.', 'warn'); return; }
+  const loading = modal('End sessions', h('p', { class: 'muted' }, 'Working out the amounts…'));
+  let quotes;
+  try {
+    quotes = await Promise.all(list.map(p =>
+      api('GET', `/api/pcs/${p.id}/quote`).then(q => ({ p, q })).catch(e => ({ p, err: e.message }))));
+  } catch (e) { loading.close(); toast(e.message, 'error'); return; }
+  loading.close();
+
+  let total = 0;
+  const rows = quotes.map(({ p, q, err }) => {
+    if (err) return h('tr', null, h('td', null, p.name), h('td', null, '—'), h('td', { class: 'small' }, h('span', { class: 'muted' }, err)), h('td', { class: 'num' }, '—'));
+    let typ = 'Staff', amt = 0, detail = 'not billed';
+    if (q.mode === 'open') { typ = 'Open'; amt = q.charge; detail = 'used ' + dur(q.activeSec); }
+    else if (q.mode === 'prepaid') { typ = 'Prepaid'; amt = 0; detail = 'paid ' + money(q.paid); }
+    total += amt;
+    return h('tr', null, h('td', null, p.name), h('td', null, typ), h('td', { class: 'small' }, detail), h('td', { class: 'num' }, amt ? money(amt) : '—'));
+  });
+  const table = h('table', null,
+    h('tr', null, h('th', null, 'PC'), h('th', null, 'Type'), h('th', null, 'Used / paid'), h('th', { class: 'num' }, 'Collect')),
+    rows,
+    h('tr', null, h('td', null, h('b', null, 'Total to collect')), h('td', null, ''), h('td', null, ''), h('td', { class: 'num' }, h('b', null, money(total)))));
+  const btn = h('button', { class: 'btn primary' }, `End ${list.length} & collect ${money(total)}`);
+  const m = modal(`End ${list.length} session(s)`, h('div', null,
+    h('p', { class: 'muted small' }, 'Open sessions are collected now. Prepaid sessions are closed with no refund — settle those one by one first if a refund is due. Amounts are as of now and finalised when you confirm.'),
+    h('div', { style: 'overflow-x:auto' }, table)),
+    [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), btn]);
+  btn.onclick = async () => {
+    await runMany(btn, 'End', list, p => api('POST', `/api/pcs/${p.id}/end`, {}));
+    m.close();
+    S.selected.clear(); S.selecting = false; rerenderPCs();
+  };
+}
+
 function moveModal(id) {
   const pc = pcById(id);
   const targets = S.snap.pcs.filter(p => p.id !== id && p.state === 'free');
@@ -747,6 +813,597 @@ function messageModal(id) {
       m.close();
     } catch (e) { /* shown */ }
   };
+}
+
+// ---------- Screens (live monitoring) ----------
+//
+// While this tab is open the panel asks the server to monitor; the server
+// tells every PC to send a small screenshot every ~2.5 s, synchronised. Each
+// tile pulls its PC's latest frame. Clicking a tile opens it full-size and the
+// server sends that one PC a sharper frame every second. Closing the tab stops
+// all of it, so idle PCs are never captured.
+
+const SCREEN_GRID_MS = 2500;
+const SCREEN_FOCUS_MS = 1000;
+
+function onlineScreenPCs() {
+  return (S.snap ? S.snap.pcs : []).filter(p => p.runtime.online);
+}
+
+function renderScreens() {
+  screensStop();
+  const grid = h('div', { class: 'screens-grid' });
+  const empty = h('p', { class: 'muted' }, 'No PCs are online. Screens appear here as soon as a gaming PC connects.');
+  const wrap = h('div', null,
+    h('div', { class: 'toolbar' },
+      h('b', null, 'Live screens'),
+      h('span', { class: 'muted small' }, 'Updates every 2–3 seconds while this tab is open. Click a screen to enlarge it.')),
+    grid, empty);
+  S.screens = { grid, empty, tiles: new Map(), focus: 0, focusModal: null, lastKey: '' };
+  screensBuildTiles();
+  // Start monitoring right away, then heartbeat so it keeps going.
+  screenPost(true);
+  S.screens.timer = setInterval(screensTick, SCREEN_GRID_MS);
+  S.screens.heartbeat = setInterval(() => screenPost(true), 4000);
+  return wrap;
+}
+
+function screenPost(watching) {
+  const focus = S.screens ? S.screens.focus : 0;
+  api('POST', '/api/screens/state', { watching, focus }).catch(() => {});
+}
+
+// screensReconcile rebuilds the grid when the set of online PCs changes.
+function screensReconcile() {
+  if (!S.screens) return;
+  const key = onlineScreenPCs().map(p => p.id).join(',');
+  if (key !== S.screens.lastKey) screensBuildTiles();
+}
+
+function screensBuildTiles() {
+  const sc = S.screens;
+  if (!sc) return;
+  const pcs = onlineScreenPCs();
+  sc.lastKey = pcs.map(p => p.id).join(',');
+  sc.empty.style.display = pcs.length ? 'none' : '';
+  // Revoke any object URLs we are about to drop.
+  for (const t of sc.tiles.values()) if (t.img.dataset.url) URL.revokeObjectURL(t.img.dataset.url);
+  sc.tiles.clear();
+  sc.grid.replaceChildren(...pcs.map(pc => {
+    const img = h('img', { class: 'screen-img', alt: '' });
+    const waiting = h('div', { class: 'screen-wait' }, 'Waiting for image…');
+    const badge = h('span', { class: 'screen-state st-' + pc.state }, STATE_LABEL[pc.state] || pc.state);
+    const tile = h('div', { class: 'screen-tile', title: 'Click to enlarge', onclick: () => openScreenModal(pc.id) },
+      h('div', { class: 'screen-frame' }, img, waiting),
+      h('div', { class: 'screen-cap' }, h('span', { class: 'screen-name' }, pc.name), badge));
+    sc.tiles.set(pc.id, { img, waiting });
+    return tile;
+  }));
+  screensTick();
+}
+
+function screensTick() {
+  if (!S.screens) return;
+  screensReconcile();
+  for (const [id, t] of S.screens.tiles) refreshScreen(id, t.img, t.waiting, SCREEN_GRID_MS * 2);
+}
+
+// refreshScreen pulls the latest frame as a blob and swaps it in only on 200,
+// so a PC with no frame yet shows "waiting" instead of a broken image.
+async function refreshScreen(id, img, waiting, timeoutMs) {
+  try {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), timeoutMs || 6000);
+    const res = await fetch(`/api/pcs/${id}/screen.jpg?t=${Date.now()}`, { credentials: 'same-origin', signal: ctrl.signal });
+    clearTimeout(to);
+    if (res.status !== 200) return;
+    const blob = await res.blob();
+    if (!blob.size) return;
+    const url = URL.createObjectURL(blob);
+    const old = img.dataset.url;
+    img.src = url; img.dataset.url = url; img.classList.add('has');
+    if (waiting) waiting.style.display = 'none';
+    if (old) URL.revokeObjectURL(old);
+  } catch (e) { /* network hiccup or aborted; next tick retries */ }
+}
+
+function openScreenModal(id) {
+  const pc = pcById(id);
+  if (!pc || !S.screens) return;
+  S.screens.focus = id;
+  screenPost(true); // ask the server for a sharper, faster frame on this PC
+  const img = h('img', { class: 'screen-big', alt: '' });
+  const waiting = h('div', { class: 'screen-wait' }, 'Waiting for image…');
+  const body = h('div', { class: 'screen-big-wrap' }, img, waiting);
+  const m = modal(pc.name + ' — live screen', body);
+  // Seed from the thumbnail immediately, then refresh at full rate.
+  refreshScreen(id, img, waiting, SCREEN_FOCUS_MS * 3);
+  const timer = setInterval(() => {
+    if (!document.body.contains(m.box)) { stop(); return; }
+    refreshScreen(id, img, waiting, SCREEN_FOCUS_MS * 3);
+  }, SCREEN_FOCUS_MS);
+  const stop = () => {
+    clearInterval(timer);
+    if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+    if (S.screens) { S.screens.focus = 0; screenPost(true); }
+  };
+  S.screens.focusModal = m;
+}
+
+function screensStop() {
+  const sc = S.screens;
+  if (!sc) return;
+  S.screens = null;
+  if (sc.timer) clearInterval(sc.timer);
+  if (sc.heartbeat) clearInterval(sc.heartbeat);
+  for (const t of sc.tiles.values()) if (t.img.dataset.url) URL.revokeObjectURL(t.img.dataset.url);
+  if (sc.focusModal) sc.focusModal.close();
+  screenPostRaw(false, 0); // tell the server to stop capturing now
+}
+
+// screenPostRaw posts watching state without reading S.screens (used on stop).
+function screenPostRaw(watching, focus) {
+  api('POST', '/api/screens/state', { watching, focus }).catch(() => {});
+}
+
+// ---------- Files (LAN file sharing) ----------
+//
+// Two panes: the front-desk PC's own filesystem (left) and one gaming PC's
+// single shared folder (right). Copy a file either way. The front desk can go
+// anywhere on its own machine; the gaming PC only ever exposes its shared
+// folder. This feature is local-network only.
+
+function relJoin(rel, name) { return rel ? rel + '/' + name : name; }
+function relParent(rel) { const i = rel.lastIndexOf('/'); return i < 0 ? '' : rel.slice(0, i); }
+function relLast(rel) { const i = rel.lastIndexOf('/'); return i < 0 ? rel : rel.slice(i + 1); }
+
+function renderFiles() {
+  S.files = { pcId: 0, localPath: '', localSel: null, pcRel: '', pcSel: null, timer: null };
+  // Default to the first online PC.
+  const online = (S.snap ? S.snap.pcs : []).filter(p => p.runtime && p.runtime.online);
+  if (online.length) S.files.pcId = online[0].id;
+
+  const local = localPane();
+  const pc = pcPane();
+  const xfers = h('div', { class: 'card', id: 'fs-xfers' }, h('p', { class: 'muted' }, 'No transfers yet.'));
+
+  S.files.refreshLocal = local.reload;
+  S.files.refreshPC = pc.reload;
+
+  const loadXfers = async () => {
+    let list; try { list = await api('GET', '/api/fs/transfers'); } catch (e) { return; }
+    if (!S.files) return;
+    xfers.replaceChildren(h('h2', null, 'Transfers'),
+      list.length ? h('table', { class: 'fs-xfer' },
+        h('tr', null, ['', 'File', 'PC', 'Size', 'Progress', 'Status'].map(t => h('th', null, t))),
+        list.map(tf => {
+          const pct = tf.size > 0 ? Math.min(100, Math.round(100 * tf.done / tf.size)) : (tf.status === 'done' ? 100 : 0);
+          const bar = h('div', { class: 'fs-bar' }, h('i', { style: `width:${pct}%` }));
+          const st = { active: 'badge info', done: 'badge ok', error: 'badge bad', cancelled: 'badge' }[tf.status] || 'badge';
+          return h('tr', null,
+            h('td', null, tf.dir === 'to_pc' ? '→ PC' : '← desk'),
+            h('td', null, tf.name),
+            h('td', null, tf.pcName),
+            h('td', null, fmtBytes(tf.size)),
+            h('td', null, tf.status === 'active' ? bar : (tf.status === 'done' ? fmtBytes(tf.done) : '—')),
+            h('td', null, h('span', { class: st, title: tf.error || '' }, tf.status === 'error' ? (tf.error || 'failed') : tf.status)));
+        })) : h('p', { class: 'muted' }, 'No transfers yet.'));
+  };
+  S.files.loadXfers = loadXfers;
+  loadXfers();
+  S.files.timer = setInterval(loadXfers, 1000);
+
+  setTimeout(() => paintActions(), 0); // ensure the action bar exists once attached
+  return h('div', null,
+    h('p', { class: 'muted small' }, 'Copy files between this front-desk PC and a gaming PC. The gaming PC only shares one folder; this PC can browse anywhere. Local network only.'),
+    h('div', { class: 'fs-panes' }, local.el, pc.el),
+    xfers);
+}
+
+function filesStop() {
+  const f = S.files;
+  if (!f) return;
+  S.files = null;
+  if (f.timer) clearInterval(f.timer);
+}
+
+// Left pane: this (front-desk) PC's filesystem.
+function localPane() {
+  const head = h('div', { class: 'fs-head' });
+  const body = h('div', { class: 'fs-list' }, h('p', { class: 'muted' }, 'Loading…'));
+  let cur = null; // last LocalListing
+
+  const paint = () => {
+    const f = S.files; if (!f || !cur) return;
+    head.replaceChildren(
+      h('b', null, 'This PC'),
+      h('button', { class: 'btn small', disabled: cur.atRoot, onclick: () => go(cur.parent || '') }, '↑ Up'),
+      h('span', { class: 'fs-path', title: cur.path || 'Drives' }, cur.path || 'Drives'));
+    const rows = cur.entries.map(e => {
+      if (e.isDir) return h('div', { class: 'fs-row dir', onclick: () => go(e.path) }, h('span', { class: 'fs-ic' }, '📁'), h('span', { class: 'fs-nm' }, e.name));
+      const on = f.localSel && f.localSel.path === e.path;
+      return h('div', { class: 'fs-row file' + (on ? ' sel' : ''), onclick: () => { f.localSel = { path: e.path, name: e.name }; paint(); } },
+        h('span', { class: 'fs-ic' }, '📄'), h('span', { class: 'fs-nm' }, e.name), h('span', { class: 'fs-sz' }, fmtBytes(e.size)));
+    });
+    body.replaceChildren(cur.entries.length ? h('div', null, rows) : h('p', { class: 'muted' }, 'Empty folder.'));
+    paintActions();
+  };
+  const go = async (path) => {
+    const f = S.files; if (!f) return;
+    try { cur = await api('GET', `/api/fs/local?path=${encodeURIComponent(path)}`); }
+    catch (e) { body.replaceChildren(h('p', { class: 'error' }, e.message)); return; }
+    if (!S.files) return;
+    f.localPath = cur.path; f.localSel = null;
+    paint();
+  };
+  go('');
+  return { el: h('div', { class: 'card fs-pane' }, head, body), reload: () => go(S.files ? S.files.localPath : '') };
+}
+
+// Right pane: one gaming PC's shared folder.
+function pcPane() {
+  const head = h('div', { class: 'fs-head' });
+  const body = h('div', { class: 'fs-list' }, h('p', { class: 'muted' }, 'Pick a PC.'));
+  let cur = null; // last FSListing
+
+  const picker = () => {
+    const online = (S.snap ? S.snap.pcs : []).filter(p => p.runtime && p.runtime.online);
+    const sel = h('select', { onchange: () => { S.files.pcId = Number(sel.value); S.files.pcRel = ''; S.files.pcSel = null; load(); } },
+      h('option', { value: 0 }, online.length ? '— choose a PC —' : 'No PCs online'),
+      online.map(p => h('option', { value: p.id, selected: p.id === S.files.pcId }, p.name)));
+    return sel;
+  };
+  const paint = () => {
+    const f = S.files; if (!f) return;
+    head.replaceChildren(
+      picker(),
+      h('button', { class: 'btn small', disabled: !cur || !f.pcRel, onclick: () => nav(relParent(f.pcRel)) }, '↑ Up'),
+      h('span', { class: 'fs-path', title: f.pcRel || 'Shared' }, f.pcRel ? 'Shared/' + f.pcRel : 'Shared'));
+    if (!cur) { body.replaceChildren(h('p', { class: 'muted' }, f.pcId ? 'Loading…' : 'Pick a PC to see its shared folder.')); paintActions(); return; }
+    const rows = cur.entries.map(e => {
+      if (e.isDir) return h('div', { class: 'fs-row dir', onclick: () => nav(relJoin(f.pcRel, e.name)) }, h('span', { class: 'fs-ic' }, '📁'), h('span', { class: 'fs-nm' }, e.name));
+      const on = f.pcSel === e.name;
+      return h('div', { class: 'fs-row file' + (on ? ' sel' : ''), onclick: () => { f.pcSel = e.name; paint(); } },
+        h('span', { class: 'fs-ic' }, '📄'), h('span', { class: 'fs-nm' }, e.name), h('span', { class: 'fs-sz' }, fmtBytes(e.size)));
+    });
+    body.replaceChildren(cur.entries.length ? h('div', null, rows) : h('p', { class: 'muted' }, 'This folder is empty. Files dropped here (or sent from the left) appear here.'));
+    paintActions();
+  };
+  const nav = async (rel) => {
+    const f = S.files; if (!f) return;
+    f.pcRel = rel; f.pcSel = null;
+    paint(); // show the new path immediately
+    try { const r = await api('GET', `/api/fs/pc/${f.pcId}?rel=${encodeURIComponent(rel)}`); if (!S.files) return; cur = r; }
+    catch (e) { cur = null; body.replaceChildren(h('p', { class: 'error' }, e.message)); return; }
+    paint();
+  };
+  const load = () => { cur = null; if (S.files && S.files.pcId) nav(''); else paint(); };
+  load();
+  // reload re-lists the folder currently open (keeps the admin's place after a send).
+  return { el: h('div', { class: 'card fs-pane' }, head, body), reload: () => { cur = null; if (S.files && S.files.pcId) nav(S.files.pcRel); else paint(); } };
+}
+
+// The send/get action bar lives between the panes; repaint it whenever a
+// selection changes so the buttons enable/disable correctly.
+function paintActions() {
+  const f = S.files; if (!f) return;
+  let bar = document.getElementById('fs-actions');
+  if (!bar) {
+    bar = h('div', { class: 'fs-actions', id: 'fs-actions' });
+    const panes = document.querySelector('.fs-panes');
+    if (panes) panes.after(bar); else return;
+  }
+  const canSend = !!(f.localSel && f.pcId);
+  const canGet = !!(f.pcSel && f.pcId && f.localPath);
+  const send = h('button', { class: 'btn primary', disabled: !canSend, onclick: e => doSend(e.target) },
+    f.localSel ? `Send “${f.localSel.name}” →` : 'Send → PC');
+  const get = h('button', { class: 'btn primary', disabled: !canGet, onclick: e => doGet(e.target) },
+    f.pcSel ? `← Get “${f.pcSel}”` : '← Get from PC');
+  const hint = !f.pcId ? 'Pick a PC on the right.'
+    : (!f.localSel && !f.pcSel ? 'Pick a file in either pane.'
+      : (f.pcSel && !f.localPath ? 'Open a folder on the left to receive the file.' : ''));
+  bar.replaceChildren(get, send, hint ? h('span', { class: 'muted small' }, hint) : null);
+}
+
+async function doSend(btn) {
+  const f = S.files; if (!f || !f.localSel || !f.pcId) return;
+  await act(btn, () => api('POST', '/api/fs/send', { pcId: f.pcId, srcPath: f.localSel.path, destRel: f.pcRel }), 'Sending…')
+    .then(() => { if (S.files) { S.files.loadXfers(); setTimeout(() => S.files && S.files.refreshPC(), 400); } }).catch(() => {});
+}
+
+async function doGet(btn) {
+  const f = S.files; if (!f || !f.pcSel || !f.pcId || !f.localPath) return;
+  await act(btn, () => api('POST', '/api/fs/get', { pcId: f.pcId, srcRel: f.pcRel, name: f.pcSel, destDir: f.localPath }), 'Getting…')
+    .then(() => { if (S.files) { S.files.loadXfers(); setTimeout(() => S.files && S.files.refreshLocal(), 400); } }).catch(() => {});
+}
+
+// ---------- Bookings ----------
+
+function isoOf(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+function timeInputVal(d) { return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }
+
+function rerenderBookingsTab() { const m = document.getElementById('main'); if (m && S.tab === 'bookings') m.replaceChildren(renderBookings()); }
+
+function renderBookings() {
+  if (!S.bookView) S.bookView = 'timeline';
+  if (!S.bookDay) S.bookDay = todayISO();
+  const out = h('div', null, h('p', { class: 'muted' }, 'Loading…'));
+  const label = h('b', { style: 'min-width:200px;text-align:center' });
+  const span = S.bookView === 'timeline' ? 1 : 7;
+  const load = async () => {
+    const from = new Date(S.bookDay + 'T00:00:00');
+    const to = new Date(from.getTime() + span * 86400000);
+    if (S.bookView === 'timeline') label.textContent = from.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+    else label.textContent = `${from.toLocaleDateString()} – ${new Date(to.getTime() - 86400000).toLocaleDateString()}`;
+    try {
+      const list = await api('GET', `/api/bookings?from=${Math.floor(from.getTime() / 1000)}&to=${Math.floor(to.getTime() / 1000)}`);
+      out.replaceChildren(S.bookView === 'timeline' ? bookingsTimeline(list, from, load) : bookingsWeek(list, from, load));
+    } catch (e) { out.replaceChildren(h('p', { class: 'error' }, e.message)); }
+  };
+  const nav = d => { const f = new Date(S.bookDay + 'T00:00:00'); f.setDate(f.getDate() + d * span); S.bookDay = isoOf(f); load(); };
+  const viewBtn = (v, l) => h('button', { class: 'btn small' + (S.bookView === v ? ' primary' : ''), onclick: () => { if (S.bookView !== v) { S.bookView = v; rerenderBookingsTab(); } } }, l);
+  load();
+  return h('div', null,
+    h('div', { class: 'toolbar' },
+      h('button', { class: 'btn primary', onclick: () => bookingModal(null, load) }, '+ New booking'),
+      h('span', { class: 'grow' }),
+      viewBtn('timeline', 'Timeline'), viewBtn('list', 'Week list'),
+      h('span', { style: 'width:10px' }),
+      h('button', { class: 'btn small', onclick: () => nav(-1) }, '‹'),
+      h('button', { class: 'btn small', onclick: () => { S.bookDay = todayISO(); load(); } }, 'Today'),
+      label,
+      h('button', { class: 'btn small', onclick: () => nav(1) }, '›')),
+    out);
+}
+
+// bookingsTimeline draws a day grid: one row per PC, hours across, a bar per booking.
+function bookingsTimeline(list, dayStart, reload) {
+  const pcs = (S.snap ? S.snap.pcs : []);
+  const d0 = dayStart.getTime(), d1 = d0 + 86400000;
+  const clamp = ms => Math.max(d0, Math.min(d1, ms));
+  const hOf = ms => (ms - d0) / 3600000;
+  let minH = 24, maxH = 0;
+  list.forEach(b => {
+    const s = clamp(new Date(b.startAt).getTime()), e = clamp(new Date(b.endAt).getTime());
+    if (e <= s) return;
+    minH = Math.min(minH, hOf(s)); maxH = Math.max(maxH, hOf(e));
+  });
+  if (minH >= maxH) { minH = 12; maxH = 24; }
+  minH = Math.floor(minH); maxH = Math.ceil(maxH);
+  if (maxH - minH < 4) maxH = Math.min(24, minH + 4);
+  const hourW = 64, span = maxH - minH, trackW = span * hourW;
+  const left = ms => (hOf(ms) - minH) * hourW;
+
+  const byPC = {};
+  list.forEach(b => (b.pcIds || []).forEach(id => { (byPC[id] = byPC[id] || []).push(b); }));
+
+  const ruler = h('div', { class: 'tl-ruler', style: `width:${trackW}px` },
+    Array.from({ length: span }, (_, i) => h('div', { class: 'tl-hour', style: `left:${i * hourW}px;width:${hourW}px` }, `${String((minH + i) % 24).padStart(2, '0')}:00`)));
+
+  const rows = pcs.map(pc => {
+    const bars = (byPC[pc.id] || []).map(b => {
+      const s = clamp(new Date(b.startAt).getTime()), e = clamp(new Date(b.endAt).getTime());
+      if (e <= s) return null;
+      const x = left(s), w = Math.max(10, left(e) - left(s));
+      return h('div', { class: 'tl-bar st-' + b.status, style: `left:${x}px;width:${w}px`, title: `${b.who} · ${timeStr(b.startAt)}–${timeStr(b.endAt)} · ${(b.pcNames || []).join(', ')}`, onclick: () => bookingModal(b, reload) }, b.who);
+    });
+    return h('div', { class: 'tl-row' }, h('div', { class: 'tl-name' }, pc.name),
+      h('div', { class: 'tl-track', style: `width:${trackW}px;background-size:${hourW}px 100%` }, bars));
+  });
+  if (!pcs.length) return h('div', { class: 'card' }, h('p', { class: 'muted' }, 'No PCs yet.'));
+  return h('div', { class: 'card' }, h('div', { class: 'tl-scroll' },
+    h('div', { class: 'tl-head' }, h('div', { class: 'tl-name tl-corner' }, 'PC'), ruler), rows));
+}
+
+const BOOK_BADGE = { scheduled: ['info', 'Scheduled'], started: ['ok', 'Started'], cancelled: ['', 'Cancelled'], noshow: ['warn', 'No-show'] };
+
+function bookingsWeek(list, from, reload) {
+  if (!list.length) return h('div', { class: 'card' }, h('p', { class: 'muted' }, 'No bookings this week. Click "New booking" to add one.'));
+  const box = h('div');
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(from.getTime() + i * 86400000);
+    const todays = list.filter(b => new Date(b.startAt).toDateString() === d.toDateString());
+    if (!todays.length) continue;
+    box.append(h('div', { class: 'card' },
+      h('h3', null, d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })),
+      h('div', { style: 'overflow-x:auto' }, h('table', null,
+        h('tr', null, ['Time', 'Who', 'PCs', 'Status', ''].map(t => h('th', null, t))),
+        todays.map(b => bookingRow(b, reload))))));
+  }
+  return box;
+}
+
+function bookingRow(b, reload) {
+  const [cls, lbl] = BOOK_BADGE[b.status] || ['', b.status];
+  const actions = [];
+  if (b.status === 'scheduled' || b.status === 'started') {
+    actions.push(h('button', { class: 'btn small', onclick: () => bookingModal(b, reload) }, 'Edit'));
+    if (b.status === 'started') actions.push(h('button', { class: 'btn small danger', onclick: async e => { if (await confirmBox('No-show', `Release ${b.who}'s PCs as a no-show? Their sessions end with no charge.`, 'Release', true)) act(e.target, () => api('POST', `/api/bookings/${b.id}/noshow`), 'Released').then(reload).catch(() => {}); } }, 'No-show'));
+    actions.push(h('button', { class: 'btn small', onclick: async e => { if (await confirmBox('Cancel booking', `Cancel ${b.who}'s booking?`, 'Cancel booking', true)) act(e.target, () => api('POST', `/api/bookings/${b.id}/cancel`), 'Cancelled').then(reload).catch(() => {}); } }, 'Cancel'));
+  }
+  return h('tr', null,
+    h('td', null, `${timeStr(b.startAt)}–${timeStr(b.endAt)}`),
+    h('td', null, b.who, b.phone ? h('div', { class: 'muted small' }, b.phone) : null, b.kind === 'group' ? h('div', { class: 'muted small' }, `group · ${b.members} member(s)`) : null, b.note ? h('div', { class: 'muted small' }, b.note) : null),
+    h('td', { class: 'small' }, (b.pcNames || []).join(', ')),
+    h('td', null, h('span', { class: 'badge ' + cls }, lbl)),
+    h('td', null, h('div', { class: 'row' }, actions)));
+}
+
+async function bookingModal(existing, reload) {
+  let clients = [], groups = [];
+  try { [clients, groups] = await Promise.all([api('GET', '/api/clients'), api('GET', '/api/groups')]); }
+  catch (e) { toast(e.message, 'error'); return; }
+
+  const start = existing ? new Date(existing.startAt) : (() => { const d = new Date(); d.setMinutes(0, 0, 0); d.setHours(d.getHours() + 1); return d; })();
+  const end = existing ? new Date(existing.endAt) : new Date(start.getTime() + 2 * 3600000);
+
+  let mode = existing && existing.kind === 'group' ? 'group' : 'client';
+  const modeBtns = [['client', 'Individual client'], ['group', 'Group']].map(([k, l]) =>
+    h('button', { type: 'button', class: 'btn', onclick: () => { mode = k; drawPicker(); } }, l));
+  const pickerBox = h('div');
+  let picker = null;
+  function drawPicker() {
+    modeBtns.forEach((btn, i) => btn.classList.toggle('primary', ['client', 'group'][i] === mode));
+    if (mode === 'client') {
+      picker = h('select', null, h('option', { value: 0 }, '— choose a client —'), clients.map(c => h('option', { value: c.id }, `${c.name} · ${c.phone}`)));
+      if (existing && existing.clientId) picker.value = String(existing.clientId);
+      pickerBox.replaceChildren(clients.length ? picker : h('p', { class: 'muted small' }, 'No clients yet — add one in the Clients tab first.'));
+    } else {
+      picker = h('select', null, h('option', { value: 0 }, '— choose a group —'), groups.map(g => h('option', { value: g.id }, `${g.name} (${g.members.length})`)));
+      if (existing && existing.groupId) picker.value = String(existing.groupId);
+      pickerBox.replaceChildren(groups.length ? picker : h('p', { class: 'muted small' }, 'No groups yet — make one in the Clients tab first.'));
+    }
+  }
+
+  const dateIn = h('input', { type: 'date', value: isoOf(start) });
+  const startIn = h('input', { type: 'time', value: timeInputVal(start) });
+  const endIn = h('input', { type: 'time', value: timeInputVal(end) });
+  const note = h('input', { type: 'text', value: existing ? existing.note || '' : '', placeholder: 'optional' });
+
+  const pcs = (S.snap ? S.snap.pcs : []);
+  const checks = pcs.map(pc => {
+    const cb = h('input', { type: 'checkbox', value: pc.id });
+    if (existing && (existing.pcIds || []).includes(pc.id)) cb.checked = true;
+    return { pc, cb, el: h('label', { class: 'pcpick' }, cb, pc.name) };
+  });
+  const pcBox = h('div', { class: 'pcpicks' }, checks.map(c => c.el));
+
+  const chosenPCs = () => checks.filter(c => c.cb.checked).map(c => c.pc.id);
+  const btn = h('button', { class: 'btn primary' }, existing ? 'Save booking' : 'Create booking');
+  const m = modal(existing ? 'Edit booking' : 'New booking', h('div', null,
+    h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'Booked for'),
+    h('div', { class: 'row', style: 'margin-bottom:6px' }, modeBtns), pickerBox,
+    h('div', { class: 'section' },
+      h('div', { class: 'row' }, field('Day', dateIn), field('From', startIn), field('To', endIn)),
+      h('div', { class: 'muted small' }, 'If "To" is earlier than "From", it counts as overnight (next day).')),
+    h('div', { class: 'section' }, h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'PCs'), pcBox),
+    field('Note', note)),
+  [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), btn]);
+  drawPicker();
+
+  async function submit(force) {
+    const whoId = Number(picker && picker.value);
+    if (!whoId) { toast(mode === 'client' ? 'Choose a client.' : 'Choose a group.', 'error'); return; }
+    const ids = chosenPCs();
+    if (!ids.length) { toast('Choose at least one PC.', 'error'); return; }
+    const startD = new Date(`${dateIn.value}T${startIn.value}`);
+    let endD = new Date(`${dateIn.value}T${endIn.value}`);
+    if (isNaN(startD) || isNaN(endD)) { toast('Enter a valid day and times.', 'error'); return; }
+    if (endD <= startD) endD = new Date(endD.getTime() + 86400000);
+    const body = { note: note.value, pcIds: ids, start: Math.floor(startD.getTime() / 1000), end: Math.floor(endD.getTime() / 1000), force };
+    if (mode === 'group') body.groupId = whoId; else body.clientId = whoId;
+    try {
+      btn.disabled = true;
+      const r = existing ? await api('PUT', `/api/bookings/${existing.id}`, body) : await api('POST', '/api/bookings', body);
+      if (r.booking) { toast('Booking saved', 'ok'); m.close(); reload(); return; }
+      if (r.conflicts && r.conflicts.length) {
+        const txt = r.conflicts.map(c => `${c.who} ${timeStr(c.startAt)}–${timeStr(c.endAt)} on ${(c.pcNames || []).join(', ')}`).join('; ');
+        if (await confirmBox('Overlap', `This clashes with: ${txt}. Book anyway?`, 'Book anyway', true)) { btn.disabled = false; submit(true); return; }
+      }
+    } catch (e) { toast(e.message, 'error'); }
+    finally { btn.disabled = false; }
+  }
+  btn.onclick = () => submit(false);
+}
+
+// ---------- Clients & groups ----------
+
+function renderClients() {
+  const wrap = h('div');
+  const groups = groupsCard();
+  wrap.append(clientsCard(() => groups.reload()), groups.el);
+  return wrap;
+}
+
+function clientsCard(onChange) {
+  const box = h('div', null, h('p', { class: 'muted' }, 'Loading…'));
+  const search = h('input', { type: 'text', placeholder: 'Search by name or phone…', style: 'flex:1' });
+  let timer = null;
+  const load = async () => {
+    try {
+      const list = await api('GET', `/api/clients?q=${encodeURIComponent(search.value.trim())}`);
+      box.replaceChildren(list.length ? h('div', { style: 'overflow-x:auto' }, h('table', null,
+        h('tr', null, ['Name', 'Phone', 'Note', ''].map(t => h('th', null, t))),
+        list.map(c => {
+          const name = h('input', { type: 'text', value: c.name, style: 'width:140px' });
+          const phone = h('input', { type: 'text', value: c.phone, style: 'width:120px' });
+          const note = h('input', { type: 'text', value: c.note || '', placeholder: 'e.g. VIP, banned', style: 'width:160px' });
+          const save = h('button', { class: 'btn small primary', onclick: e => act(e.target, () => api('PUT', `/api/clients/${c.id}`, { name: name.value, phone: phone.value, note: note.value }), 'Saved').catch(() => {}) }, 'Save');
+          const del = h('button', { class: 'btn small danger', onclick: async e => { if (await confirmBox('Delete client', `Delete ${c.name}? Booking history is kept.`, 'Delete', true)) { await act(e.target, () => api('DELETE', `/api/clients/${c.id}`), 'Deleted').then(() => { load(); onChange && onChange(); }).catch(() => {}); } } }, 'Delete');
+          return h('tr', null, h('td', null, name), h('td', null, phone), h('td', null, note), h('td', null, save, ' ', del));
+        }))) : h('p', { class: 'muted' }, search.value.trim() ? 'No clients match.' : 'No clients yet.'));
+    } catch (e) { box.replaceChildren(h('p', { class: 'error' }, e.message)); }
+  };
+  search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 250); });
+  load();
+
+  const nName = h('input', { type: 'text', placeholder: 'Name', style: 'width:140px' });
+  const nPhone = h('input', { type: 'text', placeholder: 'Phone', style: 'width:120px' });
+  const nNote = h('input', { type: 'text', placeholder: 'Note (optional)', style: 'width:160px' });
+  const add = h('button', { class: 'btn primary' }, 'Add client');
+  add.onclick = async () => {
+    if (!nName.value.trim() || !nPhone.value.trim()) { toast('Name and phone are required.', 'error'); return; }
+    await act(add, () => api('POST', '/api/clients', { name: nName.value, phone: nPhone.value, note: nNote.value }), 'Client added').then(() => { nName.value = nPhone.value = nNote.value = ''; load(); onChange && onChange(); }).catch(() => {});
+  };
+  return h('div', { class: 'card' }, h('h2', null, 'Clients'),
+    h('p', { class: 'muted small' }, 'Name and phone are both required. They don\'t have to be unique — the same name or number can appear more than once.'),
+    h('div', { class: 'row', style: 'margin-bottom:10px' }, search),
+    box,
+    h('h3', null, 'Add a client'),
+    h('div', { class: 'row' }, nName, nPhone, nNote, add));
+}
+
+function groupsCard() {
+  const box = h('div', null, h('p', { class: 'muted' }, 'Loading…'));
+  let clients = [];
+  const clientName = id => { const c = clients.find(x => x.id === id); return c ? `${c.name} (${c.phone})` : `#${id}`; };
+  const clientPicker = () => {
+    const sel = h('select', null, h('option', { value: 0 }, '— choose a client —'), clients.map(c => h('option', { value: c.id }, `${c.name} · ${c.phone}`)));
+    return sel;
+  };
+  const load = async () => {
+    try {
+      clients = await api('GET', '/api/clients');
+      // refill the "first member" picker now that clients are loaded
+      firstMember.replaceChildren(h('option', { value: 0 }, '— choose a client —'),
+        ...clients.map(c => h('option', { value: c.id }, `${c.name} · ${c.phone}`)));
+      const groups = await api('GET', '/api/groups');
+      box.replaceChildren(groups.length ? h('div', null, groups.map(g => {
+        const name = h('input', { type: 'text', value: g.name, style: 'width:160px' });
+        const note = h('input', { type: 'text', value: g.note || '', placeholder: 'note', style: 'width:160px' });
+        const members = h('div', { class: 'row', style: 'margin:6px 0' }, (g.members || []).map(m =>
+          h('span', { class: 'badge info' }, `${m.name}`,
+            h('button', { class: 'xchip', title: 'Remove from group', onclick: async e => { await act(e.target, () => api('DELETE', `/api/groups/${g.id}/members/${m.id}`), 'Removed').then(load).catch(() => {}); } }, '×'))));
+        const addSel = clientPicker();
+        const addBtn = h('button', { class: 'btn small', onclick: e => { const cid = Number(addSel.value); if (!cid) return; act(e.target, () => api('POST', `/api/groups/${g.id}/members`, { clientId: cid }), 'Added').then(load).catch(() => {}); } }, 'Add member');
+        const save = h('button', { class: 'btn small primary', onclick: e => act(e.target, () => api('PUT', `/api/groups/${g.id}`, { name: name.value, note: note.value }), 'Saved').catch(() => {}) }, 'Save');
+        const del = h('button', { class: 'btn small danger', onclick: async e => { if (await confirmBox('Delete group', `Delete group ${g.name}? The clients themselves are kept.`, 'Delete', true)) { await act(e.target, () => api('DELETE', `/api/groups/${g.id}`), 'Deleted').then(load).catch(() => {}); } } }, 'Delete');
+        return h('div', { class: 'card', style: 'margin-bottom:10px' },
+          h('div', { class: 'row' }, h('b', null, 'Group:'), name, note, save, del),
+          h('div', { class: 'muted small', style: 'margin-top:6px' }, `${(g.members || []).length} member(s):`),
+          members,
+          h('div', { class: 'row' }, addSel, addBtn));
+      })) : h('p', { class: 'muted' }, 'No groups yet.'));
+    } catch (e) { box.replaceChildren(h('p', { class: 'error' }, e.message)); }
+  };
+  load();
+
+  const gName = h('input', { type: 'text', placeholder: 'Group name', style: 'width:160px' });
+  const gNote = h('input', { type: 'text', placeholder: 'Note (optional)', style: 'width:160px' });
+  const firstMember = clientPicker();
+  const create = h('button', { class: 'btn primary' }, 'Create group');
+  create.onclick = async () => {
+    const cid = Number(firstMember.value);
+    if (!gName.value.trim()) { toast('Group name is required.', 'error'); return; }
+    if (!cid) { toast('Pick at least one client for the group.', 'error'); return; }
+    await act(create, () => api('POST', '/api/groups', { name: gName.value, note: gNote.value, memberIds: [cid] }), 'Group created').then(() => { gName.value = gNote.value = ''; load(); }).catch(() => {});
+  };
+  const el = h('div', { class: 'card' }, h('h2', null, 'Groups'),
+    h('p', { class: 'muted small' }, 'A group is a set of clients booked together (e.g. a team). It needs at least one client; add or remove members anytime.'),
+    box,
+    h('h3', null, 'Create a group'),
+    h('div', { class: 'row' }, gName, gNote, h('span', { class: 'muted small' }, 'first member:'), firstMember, create));
+  return { el, reload: load };
 }
 
 // ---------- Shift & cash ----------
