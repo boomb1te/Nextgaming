@@ -1481,7 +1481,7 @@ function clientsCard(onChange) {
     await act(add, () => api('POST', '/api/clients', { name: nName.value, phone: nPhone.value, note: nNote.value }), 'Client added').then(() => { nName.value = nPhone.value = nNote.value = ''; load(); onChange && onChange(); }).catch(() => {});
   };
   return h('div', { class: 'card' }, h('h2', null, 'Clients'),
-    h('p', { class: 'muted small' }, 'Name and phone are both required. They don\'t have to be unique — the same name or number can appear more than once.'),
+    h('p', { class: 'muted small' }, 'Name and phone are both required. The phone number must be a valid Turkmen number and is unique (used to recognise callers); names may repeat.'),
     h('div', { class: 'row', style: 'margin-bottom:10px' }, search),
     box,
     h('h3', null, 'Add a client'),

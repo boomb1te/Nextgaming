@@ -64,7 +64,7 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - **Data tab**: download a full backup, restore from a backup (applied on restart), and export payments and sessions to CSV
 
 **Clients & groups** (for booking)
-- A **Clients** tab: add customers with a name and phone (both required; neither has to be unique — the same name or number can repeat), plus an optional note ("regular", "VIP", "banned"). Search by name or phone.
+- A **Clients** tab: add customers with a name and phone (both required). The **phone number is unique** and must be a valid Turkmen number — stored as `+993…` and used to recognise callers; names may still repeat. Optional note ("regular", "VIP", "banned"). Search by name or phone.
 - **Groups**: a named set of clients booked together (e.g. a team). A group keeps at least one member; add or remove members anytime.
 - Deleting a client keeps booking history; the client just leaves its groups.
 
@@ -75,6 +75,13 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - **Never auto-ends** — you always end sessions yourself, so no live game is cut off. End and collect at the desk when the group leaves.
 - **Overlaps are a soft warning** — booking a PC that's already booked for that time warns you and lets you book anyway; you resolve clashes by editing the bookings.
 - **Release — no-show**: if a group doesn't show, one click frees their PCs (ends the sessions with no charge) and logs the no-show.
+
+**Incoming-call booking** (operator phone, local network only)
+- When a client calls the booking phone, the admin panel shows a prompt the moment the call ends: for a **known number**, *"Merdan wants to book a PC"* → one click opens the booking screen with that client already selected; for an **unknown number**, *"New caller — add & book"* → a quick add-client box with the number pre-filled (just type the name) → straight into booking.
+- The booking screen shows **who is free**: once you pick a time, it marks which PCs are already booked for that window and shows a free count ("4 of 15 PCs free for 18:00–20:00"). If the caller books for a **team**, their groups are offered as one-tap options and the PC count is pre-filled to the group size.
+- Phone numbers are matched regardless of how they were typed (`+993 65 12 34 56`, `065123456`, `65123456` all match), so a returning caller is recognised. Client numbers are **unique** for this reason.
+- The prompt **waits** until the operator books or dismisses it (it doesn't flash away), and a repeat call from the same number doesn't pile up. Missed and outgoing calls are ignored.
+- The operator phone (Android) sends the number with a tiny **MacroDroid** automation — no custom app. **Local network only**, authenticated by the club key, and excluded from any future online build. Setup: `docs/incoming-call-booking.md`. You can try the whole flow with no phone via **Settings → "Testing: simulate an incoming call"**.
 
 **File sharing** (local network only)
 - A **Files** tab with two panes: the **front-desk PC's own filesystem** on the left (browse anywhere — it's your trusted machine) and **one gaming PC's shared folder** on the right. Copy a file either way with one click.
@@ -171,6 +178,14 @@ Then open the PC in the panel → **Check & fix Windows settings** → **Test Wa
 (**Test anyway** if the Windows check still shows problems you have already fixed by hand).
 If the test fails, follow the BIOS steps shown in the panel, then test again.
 The PCs must be on Ethernet and stay plugged in (power strip on) when off.
+
+### 4. Booking phone (optional)
+
+To turn incoming calls into one-click bookings, set up the booking phone
+(Android, on the club Wi-Fi) with a small MacroDroid automation — see
+`docs/incoming-call-booking.md`. No custom app, local network only. You can try
+the feature first with no phone via **Settings → "Testing: simulate an incoming
+call"**.
 
 ## Pilot plan (recommended)
 

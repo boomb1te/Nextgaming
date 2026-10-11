@@ -45,6 +45,15 @@ Always run both `go vet ./...` and `GOOS=windows go vet ./...`: many files are `
   big copy never blocks heartbeats/screens. `internal/agent/fs.go` enforces
   containment (no `..`/symlink/absolute escape); `internal/server/fs.go` +
   `transfers.go` drive it. Never expose this in any future online build.
+- **Incoming-call booking (LAN only)**: the operator phone (MacroDroid) POSTs an
+  answered call's number to `POST /api/phone/call` (club key in `X-NextGaming-Phone`,
+  `?number=` or JSON). `internal/server/calls.go` holds pending calls in memory
+  (coalesced per number, 1h TTL) and they ride `Snapshot.PendingCalls` to the
+  panel. Client phones are unique and matched by their 8-digit local key
+  (`core.NormalizeTMPhone` / `store.ClientByPhoneKey`); migration v6 added
+  `clients.phone_key`. The panel (`web/app.js`: `updateCallBar`, `bookingModal`)
+  turns a prompt into a pre-filled booking. Never expose in any online build. Docs:
+  `docs/incoming-call-booking.md`.
 - **Admin panel**: `internal/server/web`, plain JS, no build step, embedded with `go:embed`.
   JSON API under `/api`, snapshots over SSE at `/api/events`. State-changing requests need
   the header `X-NextGaming: 1` (CSRF guard).
