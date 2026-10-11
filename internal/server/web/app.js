@@ -241,6 +241,7 @@ function renderShell() {
     h('header', { class: 'top', id: 'hdr' }),
     h('nav', { class: 'tabs' }, tabs.map(([id, label]) =>
       h('button', { 'data-tab': id, class: S.tab === id ? 'on' : '', onclick: () => { switchTab(id); } }, label))),
+    h('div', { id: 'callbar' }),
     h('main', { id: 'main' }, h('p', { class: 'muted' }, 'Connecting…')));
 }
 
@@ -267,6 +268,7 @@ function renderHeader() {
 function render() {
   if (!S.me || !document.getElementById('main')) return;
   renderHeader();
+  updateCallBar();
   if (!S.snap) return;
   const main = document.getElementById('main');
   if (S.tab !== 'screens') screensStop();
@@ -1117,6 +1119,67 @@ async function doGet(btn) {
     .then(() => { if (S.files) { S.files.loadXfers(); setTimeout(() => S.files && S.files.refreshLocal(), 400); } }).catch(() => {});
 }
 
+// ---------- Incoming-call prompts ----------
+
+// updateCallBar renders the persistent prompts for answered incoming calls. It
+// runs on every snapshot, so prompts appear on any tab and survive reconnects.
+function updateCallBar() {
+  const bar = document.getElementById('callbar');
+  if (!bar) return;
+  const calls = (S.snap && S.snap.pendingCalls) || [];
+  bar.replaceChildren(...calls.map(callPromptCard));
+}
+
+function callPromptCard(call) {
+  const known = call.clientId > 0;
+  const book = h('button', { class: 'btn small primary', onclick: () => startBookingForCall(call) }, known ? 'Book a PC' : 'Add & book');
+  const dismiss = h('button', { class: 'btn small', onclick: e => act(e.target, () => api('POST', `/api/calls/${call.id}/dismiss`)).catch(() => {}) }, 'Dismiss');
+  return h('div', { class: 'callprompt' + (known ? ' known' : '') },
+    h('span', { class: 'callicon' }, '📞'),
+    h('span', { class: 'callwho' }, known ? h('b', null, call.clientName) : h('b', null, 'New caller'),
+      known ? ' wants to book' : ' — not a client yet'),
+    h('span', { class: 'callnum' }, call.number),
+    h('span', { class: 'grow' }),
+    book, dismiss);
+}
+
+// startBookingForCall drives the call → booking flow. A known caller goes
+// straight to a pre-filled booking; an unknown one is added as a client first.
+function startBookingForCall(call) {
+  const reload = () => switchTab('bookings');
+  if (call.clientId > 0) {
+    api('POST', `/api/calls/${call.id}/dismiss`).catch(() => {});
+    bookingModal(null, reload, { clientId: call.clientId });
+  } else {
+    addClientModal(call.number, (newId) => {
+      api('POST', `/api/calls/${call.id}/dismiss`).catch(() => {});
+      bookingModal(null, reload, { clientId: newId });
+    });
+  }
+}
+
+// addClientModal adds a client with the number pre-filled (the name is all the
+// operator has to type), then hands the new id back to continue into booking.
+function addClientModal(number, onCreated) {
+  const name = h('input', { type: 'text', placeholder: 'Caller name' });
+  const phone = h('input', { type: 'text', value: number });
+  const note = h('input', { type: 'text', placeholder: 'e.g. VIP, regular' });
+  const btn = h('button', { class: 'btn primary' }, 'Add & continue');
+  const m = modal('New caller', h('div', null,
+    h('p', { class: 'muted small' }, 'This number isn\'t a client yet. Add a name to book for them.'),
+    field('Name', name), field('Phone', phone), field('Note (optional)', note)),
+    [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), btn]);
+  btn.onclick = async () => {
+    if (!name.value.trim()) { toast('Name is required.', 'error'); return; }
+    try {
+      btn.disabled = true;
+      const r = await api('POST', '/api/clients', { name: name.value, phone: phone.value, note: note.value });
+      m.close();
+      onCreated(r.id);
+    } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+  };
+}
+
 // ---------- Bookings ----------
 
 function isoOf(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
@@ -1229,30 +1292,61 @@ function bookingRow(b, reload) {
     h('td', null, h('div', { class: 'row' }, actions)));
 }
 
-async function bookingModal(existing, reload) {
+async function bookingModal(existing, reload, preset) {
   let clients = [], groups = [];
   try { [clients, groups] = await Promise.all([api('GET', '/api/clients'), api('GET', '/api/groups')]); }
   catch (e) { toast(e.message, 'error'); return; }
 
+  const presetClient = (!existing && preset && preset.clientId) ? Number(preset.clientId) : 0;
   const start = existing ? new Date(existing.startAt) : (() => { const d = new Date(); d.setMinutes(0, 0, 0); d.setHours(d.getHours() + 1); return d; })();
   const end = existing ? new Date(existing.endAt) : new Date(start.getTime() + 2 * 3600000);
+
+  const groupsForClient = cid => groups.filter(g => (g.members || []).some(m => m.id === cid));
 
   let mode = existing && existing.kind === 'group' ? 'group' : 'client';
   const modeBtns = [['client', 'Individual client'], ['group', 'Group']].map(([k, l]) =>
     h('button', { type: 'button', class: 'btn', onclick: () => { mode = k; drawPicker(); } }, l));
   const pickerBox = h('div');
+  const hintBox = h('div', { class: 'grouphints' });
   let picker = null;
-  function drawPicker() {
+  function drawPicker(selectId) {
     modeBtns.forEach((btn, i) => btn.classList.toggle('primary', ['client', 'group'][i] === mode));
     if (mode === 'client') {
       picker = h('select', null, h('option', { value: 0 }, '— choose a client —'), clients.map(c => h('option', { value: c.id }, `${c.name} · ${c.phone}`)));
-      if (existing && existing.clientId) picker.value = String(existing.clientId);
+      if (selectId) picker.value = String(selectId);
+      else if (existing && existing.clientId) picker.value = String(existing.clientId);
+      else if (presetClient) picker.value = String(presetClient);
+      picker.onchange = drawHints;
       pickerBox.replaceChildren(clients.length ? picker : h('p', { class: 'muted small' }, 'No clients yet — add one in the Clients tab first.'));
+      drawHints();
     } else {
       picker = h('select', null, h('option', { value: 0 }, '— choose a group —'), groups.map(g => h('option', { value: g.id }, `${g.name} (${g.members.length})`)));
-      if (existing && existing.groupId) picker.value = String(existing.groupId);
+      if (selectId) picker.value = String(selectId);
+      else if (existing && existing.groupId) picker.value = String(existing.groupId);
+      picker.onchange = () => onGroupChosen();
       pickerBox.replaceChildren(groups.length ? picker : h('p', { class: 'muted small' }, 'No groups yet — make one in the Clients tab first.'));
+      hintBox.replaceChildren();
+      onGroupChosen();
     }
+  }
+
+  // In client mode, offer the groups this client belongs to as one-tap options.
+  function drawHints() {
+    if (mode !== 'client') { hintBox.replaceChildren(); return; }
+    const cid = Number(picker && picker.value);
+    const gs = cid ? groupsForClient(cid) : [];
+    if (!gs.length) { hintBox.replaceChildren(); return; }
+    hintBox.replaceChildren(
+      h('span', { class: 'muted small' }, 'Booking for a team? '),
+      ...gs.map(g => h('button', { type: 'button', class: 'btn small', onclick: () => { mode = 'group'; drawPicker(g.id); } }, `${g.name} (${g.members.length})`)));
+  }
+
+  // When a group is chosen, pre-tick that many free PCs as a starting point
+  // (only if nothing is ticked yet — the operator can change it freely).
+  function onGroupChosen() {
+    const gid = Number(picker && picker.value);
+    const g = groups.find(x => x.id === gid);
+    if (g && chosenPCs().length === 0) autoTick((g.members || []).length);
   }
 
   const dateIn = h('input', { type: 'date', value: isoOf(start) });
@@ -1264,22 +1358,63 @@ async function bookingModal(existing, reload) {
   const checks = pcs.map(pc => {
     const cb = h('input', { type: 'checkbox', value: pc.id });
     if (existing && (existing.pcIds || []).includes(pc.id)) cb.checked = true;
-    return { pc, cb, el: h('label', { class: 'pcpick' }, cb, pc.name) };
+    const tag = h('span', { class: 'pctag' });
+    return { pc, cb, tag, booked: false, el: h('label', { class: 'pcpick' }, cb, h('span', { class: 'pcnm' }, pc.name), tag) };
   });
   const pcBox = h('div', { class: 'pcpicks' }, checks.map(c => c.el));
+  const availBox = h('div', { class: 'availnote muted small' });
 
   const chosenPCs = () => checks.filter(c => c.cb.checked).map(c => c.pc.id);
+  function autoTick(n) {
+    let left = n;
+    for (const c of checks) { if (left <= 0) break; if (!c.booked && !c.cb.checked) { c.cb.checked = true; left--; } }
+  }
+
+  // windowFromInputs returns the chosen booking window in unix seconds, or null.
+  function windowFromInputs() {
+    const s = new Date(`${dateIn.value}T${startIn.value}`);
+    let e2 = new Date(`${dateIn.value}T${endIn.value}`);
+    if (isNaN(s) || isNaN(e2)) return null;
+    if (e2 <= s) e2 = new Date(e2.getTime() + 86400000);
+    return { from: Math.floor(s.getTime() / 1000), to: Math.floor(e2.getTime() / 1000) };
+  }
+
+  // recomputeAvail marks which PCs are already booked for the chosen window.
+  async function recomputeAvail() {
+    const win = windowFromInputs();
+    if (!win) { availBox.replaceChildren(); return; }
+    let list = [];
+    try { list = await api('GET', `/api/bookings?from=${win.from - 86400}&to=${win.to}`); } catch (e) { return; }
+    const booked = new Set();
+    for (const b of list) {
+      if (existing && b.id === existing.id) continue;
+      if (b.status !== 'scheduled' && b.status !== 'started') continue;
+      const bs = new Date(b.startAt).getTime() / 1000, be = new Date(b.endAt).getTime() / 1000;
+      if (bs < win.to && be > win.from) (b.pcIds || []).forEach(id => booked.add(id));
+    }
+    let free = 0;
+    for (const c of checks) {
+      c.booked = booked.has(c.pc.id);
+      c.el.classList.toggle('booked', c.booked);
+      c.tag.textContent = c.booked ? 'booked' : '';
+      if (!c.booked) free++;
+    }
+    availBox.replaceChildren(`${free} of ${checks.length} PCs free for ${startIn.value}–${endIn.value}` + (free < checks.length ? ' (booked ones are marked)' : ''));
+  }
+  [dateIn, startIn, endIn].forEach(el => el.addEventListener('change', recomputeAvail));
+
   const btn = h('button', { class: 'btn primary' }, existing ? 'Save booking' : 'Create booking');
   const m = modal(existing ? 'Edit booking' : 'New booking', h('div', null,
     h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'Booked for'),
-    h('div', { class: 'row', style: 'margin-bottom:6px' }, modeBtns), pickerBox,
+    h('div', { class: 'row', style: 'margin-bottom:6px' }, modeBtns), pickerBox, hintBox,
     h('div', { class: 'section' },
       h('div', { class: 'row' }, field('Day', dateIn), field('From', startIn), field('To', endIn)),
       h('div', { class: 'muted small' }, 'If "To" is earlier than "From", it counts as overnight (next day).')),
-    h('div', { class: 'section' }, h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'PCs'), pcBox),
+    h('div', { class: 'section' }, h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'PCs'), availBox, pcBox),
     field('Note', note)),
   [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), btn]);
   drawPicker();
+  recomputeAvail();
 
   async function submit(force) {
     const whoId = Number(picker && picker.value);
@@ -1542,8 +1677,19 @@ function renderSettings() {
   const wrap = h('div');
   wrap.append(accountCard());
   if (!isOwner()) return wrap;
-  wrap.append(clubCard(), dataCard(), installCard(), zonesCard(), packagesCard(), pcsCard(), staffCard());
+  wrap.append(clubCard(), dataCard(), installCard(), zonesCard(), packagesCard(), pcsCard(), staffCard(), simulateCallCard());
   return wrap;
+}
+
+// simulateCallCard lets you test the incoming-call → booking flow without a
+// phone: type a number and it appears as a prompt exactly as a real call would.
+function simulateCallCard() {
+  const num = h('input', { type: 'text', placeholder: 'e.g. 65 12 34 56', style: 'width:160px' });
+  const go = h('button', { class: 'btn' }, 'Simulate incoming call');
+  go.onclick = () => act(go, () => api('POST', '/api/calls/simulate', { number: num.value }), 'Call prompt sent').then(() => { num.value = ''; }).catch(() => {});
+  return h('div', { class: 'card' }, h('h2', null, 'Testing: simulate an incoming call'),
+    h('p', { class: 'muted small' }, 'Pretends the operator phone received a call from this number. The prompt appears at the top on any tab — known numbers offer to book, unknown ones to add the caller first. For trying the call-to-booking flow without the phone.'),
+    h('div', { class: 'row' }, num, go));
 }
 
 function dataCard() {
