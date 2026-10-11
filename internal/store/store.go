@@ -239,6 +239,61 @@ func (s *Store) migrate() error {
 		if _, err := s.DB.Exec("PRAGMA user_version = 5"); err != nil {
 			return err
 		}
+		v = 5
+	}
+	if v < 6 {
+		// v6: client phone numbers become unique and matchable by their 8-digit
+		// local key (for call-to-booking). The key column is filled from the
+		// existing phone values; uniqueness is enforced in the server layer so
+		// pre-existing duplicates don't break the migration (they are flagged).
+		if _, err := s.DB.Exec("ALTER TABLE clients ADD COLUMN phone_key TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		if _, err := s.DB.Exec("CREATE INDEX IF NOT EXISTS idx_clients_phone_key ON clients(phone_key)"); err != nil {
+			return err
+		}
+		if err := backfillPhoneKeys(s.DB); err != nil {
+			return err
+		}
+		if _, err := s.DB.Exec("PRAGMA user_version = 6"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// backfillPhoneKeys fills phone_key for existing clients from their stored
+// phone. A number that can't be normalised is left with an empty key (it simply
+// won't match a call); it is never dropped.
+func backfillPhoneKeys(db *sql.DB) error {
+	rows, err := db.Query("SELECT id, phone FROM clients WHERE phone_key=''")
+	if err != nil {
+		return err
+	}
+	type row struct {
+		id  int64
+		key string
+	}
+	var updates []row
+	for rows.Next() {
+		var id int64
+		var phone string
+		if err := rows.Scan(&id, &phone); err != nil {
+			rows.Close()
+			return err
+		}
+		if key := core.PhoneKey(phone); key != "" {
+			updates = append(updates, row{id, key})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, u := range updates {
+		if _, err := db.Exec("UPDATE clients SET phone_key=? WHERE id=?", u.key, u.id); err != nil {
+			return err
+		}
 	}
 	return nil
 }

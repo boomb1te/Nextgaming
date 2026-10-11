@@ -108,6 +108,7 @@ func New(cfg Config) (*Server, error) {
 			store.UpdatePCWoL(st.DB, pc.ID, pc.WoL)
 		}
 	}
+	s.warnDuplicatePhones()
 	return s, nil
 }
 

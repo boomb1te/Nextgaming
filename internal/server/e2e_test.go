@@ -20,6 +20,7 @@ import (
 	"nextgaming/internal/agent"
 	"nextgaming/internal/core"
 	"nextgaming/internal/protocol"
+	"nextgaming/internal/store"
 )
 
 func freePort(t *testing.T) int {
@@ -33,10 +34,10 @@ func freePort(t *testing.T) int {
 }
 
 type env struct {
-	t      *testing.T
-	s      *Server
-	base   string
-	http   *http.Client
+	t          *testing.T
+	s          *Server
+	base       string
+	http       *http.Client
 	offset     *atomic.Int64
 	agents     []*agent.Agent
 	ports      []int
@@ -638,27 +639,37 @@ func TestClientsAndGroups(t *testing.T) {
 	e := setup(t, 0)
 	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
 
-	// name + phone required
-	if err := e.call("POST", "/api/clients", map[string]string{"name": "", "phone": "123"}, nil); err == nil {
+	// name required, phone must be a valid Turkmen number
+	if err := e.call("POST", "/api/clients", map[string]string{"name": "", "phone": "65000001"}, nil); err == nil {
 		t.Fatal("client without a name should be rejected")
 	}
 	if err := e.call("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": ""}, nil); err == nil {
 		t.Fatal("client without a phone should be rejected")
 	}
+	if err := e.call("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "123"}, nil); err == nil {
+		t.Fatal("client with an invalid (too short) phone should be rejected")
+	}
 
-	// create two clients; names/phones may repeat
+	// create two clients; names may repeat but phone numbers are unique
 	var c1, c2 struct{ ID int64 }
-	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "555-1", "note": "VIP"}, &c1)
-	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "555-1"}, &c2) // duplicate allowed
+	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "+993 65 00 00 01", "note": "VIP"}, &c1)
+	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "65000002"}, &c2) // same name OK
 	if c1.ID == 0 || c2.ID == 0 || c1.ID == c2.ID {
 		t.Fatalf("expected two distinct clients, got %d and %d", c1.ID, c2.ID)
 	}
+	// a duplicate number — in any format — is rejected
+	if err := e.call("POST", "/api/clients", map[string]string{"name": "Someone", "phone": "065000001"}, nil); err == nil {
+		t.Fatal("duplicate phone number should be rejected")
+	}
 
-	// search by phone
+	// search by phone (stored canonical form contains the local digits)
 	var found []core.Client
-	e.must("GET", "/api/clients?q=555-1", nil, &found)
-	if len(found) != 2 {
-		t.Fatalf("search by phone returned %d, want 2", len(found))
+	e.must("GET", "/api/clients?q=65000001", nil, &found)
+	if len(found) != 1 || found[0].ID != c1.ID {
+		t.Fatalf("search by phone returned %d, want 1 (c1)", len(found))
+	}
+	if found[0].Phone != "+99365000001" {
+		t.Fatalf("phone not canonicalised: %q", found[0].Phone)
 	}
 
 	// group needs at least one member
@@ -694,7 +705,7 @@ func TestBookings(t *testing.T) {
 	e := setup(t, 1)
 	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
 	var c struct{ ID int64 }
-	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "555-9"}, &c)
+	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "65000009"}, &c)
 	pc := e.pc("PC 1")
 	now := e.s.now()
 
@@ -844,4 +855,51 @@ func hasEntry(es []localEntry, name string) bool {
 		}
 	}
 	return false
+}
+
+func TestCallMatchingAndDuplicates(t *testing.T) {
+	e := setup(t, 0)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+
+	var c struct{ ID int64 }
+	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "+99365123456"}, &c)
+
+	// An incoming number in any spelling matches the same client.
+	for _, number := range []string{"+99365123456", "+993 65 12 34 56", "065123456", "65123456", "8 65 12 34 56"} {
+		got, found, err := e.s.MatchClientByPhone(number)
+		if err != nil || !found || got.ID != c.ID {
+			t.Fatalf("match %q = (%+v, %v, %v), want client %d", number, got, found, err, c.ID)
+		}
+	}
+	// A number no client has, and an unusable number, do not match.
+	for _, number := range []string{"65999999", "123", ""} {
+		if _, found, err := e.s.MatchClientByPhone(number); err != nil || found {
+			t.Fatalf("match %q unexpectedly found (err=%v)", number, err)
+		}
+	}
+
+	// No duplicates yet.
+	if dups, err := e.s.DuplicateClientPhones(); err != nil || len(dups) != 0 {
+		t.Fatalf("unexpected duplicates: %+v (err %v)", dups, err)
+	}
+
+	// Force a pre-existing duplicate the API would normally refuse (simulating
+	// data from before numbers were unique), and confirm it is reported and
+	// that matching stays deterministic (lowest id wins).
+	var dupID int64
+	if err := e.s.st.Tx(func(q store.Q) error {
+		var err error
+		dupID, err = store.CreateClient(q, "Merdan (dup)", "+99365123456", "")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dups, err := e.s.DuplicateClientPhones()
+	if err != nil || len(dups) != 1 || len(dups[0].Clients) != 2 || dups[0].Key != "65123456" {
+		t.Fatalf("duplicates = %+v (err %v)", dups, err)
+	}
+	if got, found, _ := e.s.MatchClientByPhone("65123456"); !found || got.ID != c.ID {
+		t.Fatalf("ambiguous match should pick lowest id %d, got %d (found=%v)", c.ID, got.ID, found)
+	}
+	_ = dupID
 }

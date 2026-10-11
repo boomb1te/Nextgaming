@@ -101,3 +101,47 @@ func TestBackup(t *testing.T) {
 		t.Fatalf("backup zones = %v, %v", zs, err)
 	}
 }
+
+func TestPhoneKeyBackfill(t *testing.T) {
+	s := openTemp(t)
+	// Two clients, one in a non-canonical spelling; simulate a pre-v6 DB by
+	// blanking the keys the normal insert computed.
+	id1, err := CreateClient(s.DB, "Merdan", "065123456", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateClient(s.DB, "Aman", "+993 65 99 88 77", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("UPDATE clients SET phone_key=''"); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillPhoneKeys(s.DB); err != nil {
+		t.Fatal(err)
+	}
+	// After backfill the non-canonical number is matchable by its local key.
+	c, found, err := ClientByPhoneKey(s.DB, "65123456")
+	if err != nil || !found || c.ID != id1 {
+		t.Fatalf("backfilled match = (%+v, %v, %v), want client %d", c, found, err, id1)
+	}
+}
+
+func TestDuplicatePhoneKeys(t *testing.T) {
+	s := openTemp(t)
+	if _, err := CreateClient(s.DB, "A", "65123456", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateClient(s.DB, "B", "+99365123456", ""); err != nil { // same number
+		t.Fatal(err)
+	}
+	if _, err := CreateClient(s.DB, "C", "65000000", ""); err != nil {
+		t.Fatal(err)
+	}
+	dups, err := DuplicatePhoneKeys(s.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dups) != 1 || dups[0].Key != "65123456" || len(dups[0].Clients) != 2 {
+		t.Fatalf("duplicates = %+v", dups)
+	}
+}

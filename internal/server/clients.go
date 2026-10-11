@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"nextgaming/internal/core"
@@ -15,36 +16,45 @@ func (s *Server) ListClients(search string) ([]core.Client, error) {
 	return store.ListClients(s.st.DB, search)
 }
 
-// CreateClient adds a client. Name and phone are both required (not unique).
+// CreateClient adds a client. Name is required; phone must be a valid Turkmen
+// number and is now unique (names may still repeat). The phone is stored in
+// canonical +993 form.
 func (s *Server) CreateClient(adminID int64, name, phone, note string) (int64, error) {
-	name, phone = strings.TrimSpace(name), strings.TrimSpace(phone)
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return 0, errBad("name is required")
 	}
-	if phone == "" {
-		return 0, errBad("phone number is required")
+	canonical, key, ok := core.NormalizeTMPhone(phone)
+	if !ok {
+		return 0, errBad("enter a valid Turkmen phone number (8 digits, e.g. 65 12 34 56)")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var id int64
 	err := s.st.Tx(func(q store.Q) error {
+		if ex, found, err := store.ClientByPhoneKey(q, key); err != nil {
+			return err
+		} else if found {
+			return errConflict("that number already belongs to %s", ex.Name)
+		}
 		var err error
-		if id, err = store.CreateClient(q, name, phone, note); err != nil {
+		if id, err = store.CreateClient(q, name, canonical, note); err != nil {
 			return err
 		}
-		return store.Audit(q, adminID, "client_create", 0, fmt.Sprintf("%s %s", name, phone))
+		return store.Audit(q, adminID, "client_create", 0, fmt.Sprintf("%s %s", name, canonical))
 	})
 	return id, err
 }
 
-// UpdateClient edits a client.
+// UpdateClient edits a client. The phone stays unique and is re-canonicalised.
 func (s *Server) UpdateClient(adminID, id int64, name, phone, note string) error {
-	name, phone = strings.TrimSpace(name), strings.TrimSpace(phone)
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return errBad("name is required")
 	}
-	if phone == "" {
-		return errBad("phone number is required")
+	canonical, key, ok := core.NormalizeTMPhone(phone)
+	if !ok {
+		return errBad("enter a valid Turkmen phone number (8 digits, e.g. 65 12 34 56)")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -52,11 +62,45 @@ func (s *Server) UpdateClient(adminID, id int64, name, phone, note string) error
 		if _, err := store.ClientByID(q, id); err != nil {
 			return errNotFound("client")
 		}
-		if err := store.UpdateClient(q, id, name, phone, note); err != nil {
+		if ex, found, err := store.ClientByPhoneKey(q, key); err != nil {
+			return err
+		} else if found && ex.ID != id {
+			return errConflict("that number already belongs to %s", ex.Name)
+		}
+		if err := store.UpdateClient(q, id, name, canonical, note); err != nil {
 			return err
 		}
-		return store.Audit(q, adminID, "client_update", 0, fmt.Sprintf("%d %s %s", id, name, phone))
+		return store.Audit(q, adminID, "client_update", 0, fmt.Sprintf("%d %s %s", id, name, canonical))
 	})
+}
+
+// MatchClientByPhone finds the client an incoming call number belongs to.
+// found=false when the number is unusable or no client matches.
+func (s *Server) MatchClientByPhone(number string) (core.Client, bool, error) {
+	return store.FindClientByPhone(s.st.DB, number)
+}
+
+// DuplicateClientPhones lists numbers shared by more than one client (left over
+// from before phone numbers were unique); these make call-matching ambiguous.
+func (s *Server) DuplicateClientPhones() ([]store.PhoneDup, error) {
+	return store.DuplicatePhoneKeys(s.st.DB)
+}
+
+// warnDuplicatePhones logs any pre-existing duplicate client numbers at startup
+// so the owner can resolve them (call-matching picks one deterministically).
+func (s *Server) warnDuplicatePhones() {
+	dups, err := store.DuplicatePhoneKeys(s.st.DB)
+	if err != nil || len(dups) == 0 {
+		return
+	}
+	log.Printf("clients: %d phone number(s) are shared by more than one client; call-matching will be ambiguous until you merge them:", len(dups))
+	for _, d := range dups {
+		names := make([]string, 0, len(d.Clients))
+		for _, c := range d.Clients {
+			names = append(names, c.Name)
+		}
+		log.Printf("  +993%s: %s", d.Key, strings.Join(names, ", "))
+	}
 }
 
 // DeleteClient removes a client (soft delete; booking history is kept).
