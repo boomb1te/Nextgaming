@@ -135,6 +135,7 @@ pre.cmd { background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 6px
 .screen-state.st-staff { color: var(--purple); } .screen-state.st-offline { color: var(--gray); }
 .screen-big-wrap { position: relative; width: 100%; background: #0b0e13; border-radius: 8px; min-height: 240px; display: flex; align-items: center; justify-content: center; }
 .screen-big { max-width: 100%; max-height: 72vh; display: block; }
+.screen-bigbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 .modal:has(.screen-big-wrap) { max-width: 1100px; }
 
 .tile .booked { font-size: 11px; color: var(--purple); font-weight: 600; }

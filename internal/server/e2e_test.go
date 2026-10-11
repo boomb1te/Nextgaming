@@ -965,3 +965,57 @@ func TestIncomingCallFlow(t *testing.T) {
 		t.Fatalf("simulate: %+v", snap.PendingCalls)
 	}
 }
+
+func TestHDSnapshot(t *testing.T) {
+	e := setup(t, 1)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	pc := e.pc("PC 1")
+	local := fmt.Sprintf("http://127.0.0.1:%d", e.ports[0])
+	hdFrame := []byte("\xff\xd8\xff\xe0HDSNAPSHOTBYTES\xff\xd9")
+
+	// Stand in for the capture helper: long-poll, and when asked for a frame,
+	// echo the snap flag back on the post (as the real helper does).
+	go func() {
+		for i := 0; i < 60; i++ {
+			req, _ := http.NewRequest("GET", local+"/capture-wait", nil)
+			req.Header.Set("X-NextGaming-Client", "1")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			if resp.StatusCode != 200 {
+				resp.Body.Close()
+				continue
+			}
+			var cmd struct{ Seq, Width, Quality, Snap int }
+			json.NewDecoder(resp.Body).Decode(&cmd)
+			resp.Body.Close()
+			pr, _ := http.NewRequest("POST", fmt.Sprintf("%s/screen?w=1920&h=1080&snap=%d", local, cmd.Snap), bytes.NewReader(hdFrame))
+			pr.Header.Set("X-NextGaming-Client", "1")
+			pr.Header.Set("Content-Type", "image/jpeg")
+			if rp, err := http.DefaultClient.Do(pr); err == nil {
+				rp.Body.Close()
+			}
+		}
+	}()
+
+	// No snapshot before one is requested.
+	if code, _ := e.getRaw(fmt.Sprintf("/api/pcs/%d/snapshot.jpg", pc.ID)); code != http.StatusNoContent {
+		t.Fatalf("expected 204 before a snapshot request, got %d", code)
+	}
+
+	// Request one (works without watching the grid); it arrives on the snapshot slot.
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/snapshot", pc.ID), nil, nil)
+	eventually(t, "HD snapshot arrives", func() bool {
+		code, body := e.getRaw(fmt.Sprintf("/api/pcs/%d/snapshot.jpg", pc.ID))
+		return code == 200 && bytes.Equal(body, hdFrame)
+	})
+
+	// Requesting a snapshot for an offline PC fails cleanly.
+	e.must("DELETE", fmt.Sprintf("/api/pcs/%d", pc.ID), nil, nil)
+	eventually(t, "PC offline", func() bool { return !e.s.hub.Online(pc.ID) })
+	if err := e.call("POST", fmt.Sprintf("/api/pcs/%d/snapshot", pc.ID), nil, nil); err == nil {
+		t.Fatal("snapshot on an offline PC should fail")
+	}
+}

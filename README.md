@@ -47,6 +47,7 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - Low bandwidth and CPU: small, low-quality JPEGs, captured by a small helper that the agent runs as the logged-in user (a SYSTEM process's screen grab comes back black)
 - Capture uses the Desktop Duplication API (the real GPU output), so **borderless / windowed-fullscreen games are captured** and resolution changes are followed automatically; it falls back to a plain screen grab on older hardware or Remote Desktop
 - **True exclusive-fullscreen games cannot be captured** by any monitoring tool without injecting into the game — they show the desktop instead. Set games to borderless / windowed-fullscreen (most default to this) to see them on the grid
+- **HD snapshot**: click a PC to enlarge it, then **📷 HD snapshot** for one sharp, full-resolution still image (captured on demand, not streamed) — handy for reading fine detail. It opens frozen with an "Open full size" link; the live grid is unaffected
 - Taking control of a PC (remote mouse/keyboard) is a planned follow-up; today the Screens tab is view-only, and the PCs tab already locks, messages, or ends a session on any PC
 
 **Wake-on-LAN assistant**

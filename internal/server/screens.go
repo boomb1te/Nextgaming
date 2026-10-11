@@ -24,6 +24,12 @@ const (
 	focusWidth    = 1366
 	focusQuality  = 70
 	maxFrameBytes = 6 << 20
+
+	// One-off HD snapshot: native resolution (the capturer clamps to the real
+	// screen size, never upscales) at near-full JPEG quality.
+	snapWidth   = 4000
+	snapQuality = 90
+	snapStale   = 2 * time.Minute // a snapshot older than this is not served
 )
 
 type screenFrame struct {
@@ -32,16 +38,22 @@ type screenFrame struct {
 	at   time.Time
 }
 
-// screens holds the latest frame per PC and who/what is being watched.
+// screens holds the latest frame per PC and who/what is being watched. snaps
+// holds the latest one-off HD snapshot per PC, kept separate so the live grid
+// never overwrites it.
 type screens struct {
 	mu         sync.Mutex
 	frames     map[int64]screenFrame
+	snaps      map[int64]screenFrame
+	snapReq    map[int64]time.Time // when an HD snapshot was last requested per PC
 	watchUntil time.Time
 	focus      int64
 	focusUntil time.Time
 }
 
-func newScreens() *screens { return &screens{frames: map[int64]screenFrame{}} }
+func newScreens() *screens {
+	return &screens{frames: map[int64]screenFrame{}, snaps: map[int64]screenFrame{}, snapReq: map[int64]time.Time{}}
+}
 
 func (sc *screens) store(pcID int64, data []byte, w, h int, at time.Time) {
 	if len(data) == 0 || len(data) > maxFrameBytes {
@@ -52,6 +64,16 @@ func (sc *screens) store(pcID int64, data []byte, w, h int, at time.Time) {
 	sc.mu.Unlock()
 }
 
+// storeSnap keeps the latest HD snapshot for a PC (separate from live frames).
+func (sc *screens) storeSnap(pcID int64, data []byte, w, h int, at time.Time) {
+	if len(data) == 0 || len(data) > maxFrameBytes {
+		return
+	}
+	sc.mu.Lock()
+	sc.snaps[pcID] = screenFrame{data: data, w: w, h: h, at: at}
+	sc.mu.Unlock()
+}
+
 func (sc *screens) get(pcID int64) (screenFrame, bool) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -59,9 +81,36 @@ func (sc *screens) get(pcID int64) (screenFrame, bool) {
 	return f, ok
 }
 
+// markSnapRequest records that a fresh HD snapshot was just asked for, and
+// clears any previous one so a stale image isn't served while we wait.
+func (sc *screens) markSnapRequest(pcID int64, now time.Time) {
+	sc.mu.Lock()
+	delete(sc.snaps, pcID)
+	sc.snapReq[pcID] = now
+	sc.mu.Unlock()
+}
+
+// readySnap returns the HD snapshot only once one captured *after* the latest
+// request has arrived and is still fresh. Freshness is judged entirely on the
+// server clock, so the admin's browser clock is irrelevant.
+func (sc *screens) readySnap(pcID int64, now time.Time) (screenFrame, bool) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	f, ok := sc.snaps[pcID]
+	if !ok || len(f.data) == 0 || now.Sub(f.at) > snapStale {
+		return screenFrame{}, false
+	}
+	if req, has := sc.snapReq[pcID]; has && f.at.Before(req) {
+		return screenFrame{}, false
+	}
+	return f, true
+}
+
 func (sc *screens) drop(pcID int64) {
 	sc.mu.Lock()
 	delete(sc.frames, pcID)
+	delete(sc.snaps, pcID)
+	delete(sc.snapReq, pcID)
 	sc.mu.Unlock()
 }
 
@@ -142,4 +191,14 @@ func (s *Server) screenLoop(ctx context.Context) {
 			s.hub.Send(foc, protocol.TypeCapture, protocol.CaptureRequest{Width: focusWidth, Quality: focusQuality})
 		}
 	}
+}
+
+// RequestSnapshot asks a PC for a single high-resolution frame (shown once,
+// not streamed). It works whether or not the Screens grid is being watched.
+func (s *Server) RequestSnapshot(pcID int64) error {
+	if !s.hub.Online(pcID) {
+		return errConflict("%s is offline.", s.pcName(pcID))
+	}
+	s.screens.markSnapRequest(pcID, time.Now())
+	return s.hub.Send(pcID, protocol.TypeCapture, protocol.CaptureRequest{Width: snapWidth, Quality: snapQuality, Snap: true})
 }

@@ -225,7 +225,7 @@ func (a *app) captureLoop() {
 			resp.Body.Close()
 			continue // 204: no request this round, poll again
 		}
-		var cmd struct{ Seq, Width, Quality int }
+		var cmd struct{ Seq, Width, Quality, Snap int }
 		json.NewDecoder(resp.Body).Decode(&cmd)
 		resp.Body.Close()
 		if cmd.Width <= 0 {
@@ -235,7 +235,7 @@ func (a *app) captureLoop() {
 		if err != nil || len(data) == 0 {
 			continue
 		}
-		pr, _ := http.NewRequest("POST", fmt.Sprintf("%s/screen?w=%d&h=%d", base, cw, ch), bytes.NewReader(data))
+		pr, _ := http.NewRequest("POST", fmt.Sprintf("%s/screen?w=%d&h=%d&snap=%d", base, cw, ch, cmd.Snap), bytes.NewReader(data))
 		pr.Header.Set("X-NextGaming-Client", "1")
 		pr.Header.Set("Content-Type", "image/jpeg")
 		if rp, err := postClient.Do(pr); err == nil {

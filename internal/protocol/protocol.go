@@ -30,8 +30,8 @@ const (
 // Message types.
 const (
 	// agent -> server
-	TypeHello      = "hello"
-	TypeHeartbeat  = "heartbeat"
+	TypeHello       = "hello"
+	TypeHeartbeat   = "heartbeat"
 	TypeWoLReport   = "wol_report"
 	TypeEvent       = "event"
 	TypeAck         = "ack"
@@ -234,8 +234,9 @@ type StaffLogin struct {
 // The server broadcasts it to every online PC on a shared tick, so all PCs
 // capture at the same moment while the monitoring tab is open.
 type CaptureRequest struct {
-	Width   int `json:"width"`
-	Quality int `json:"quality"`
+	Width   int  `json:"width"`
+	Quality int  `json:"quality"`
+	Snap    bool `json:"snap,omitempty"` // a one-off high-res snapshot, not a live-grid frame
 }
 
 // ScreenFrame is one captured screen, relayed agent -> server. Data is a JPEG
@@ -244,6 +245,7 @@ type ScreenFrame struct {
 	Data []byte `json:"data"`
 	W    int    `json:"w"`
 	H    int    `json:"h"`
+	Snap bool   `json:"snap,omitempty"` // this frame answers a one-off HD snapshot request
 }
 
 // WoLCheck asks the agent to check (and optionally fix) its Wake-on-LAN setup.

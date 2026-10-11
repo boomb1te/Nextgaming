@@ -59,7 +59,7 @@ func (a *Agent) serveLocal(ctx context.Context) error {
 			return
 		}
 		a.capMu.Lock()
-		resp := map[string]int{"seq": int(a.capSeq), "width": a.capW, "quality": a.capQ}
+		resp := map[string]int{"seq": int(a.capSeq), "width": a.capW, "quality": a.capQ, "snap": boolToInt(a.capSnap)}
 		a.capMu.Unlock()
 		writeJSON(w, http.StatusOK, resp)
 	})
@@ -75,7 +75,7 @@ func (a *Agent) serveLocal(ctx context.Context) error {
 		}
 		cw, _ := strconv.Atoi(r.URL.Query().Get("w"))
 		ch, _ := strconv.Atoi(r.URL.Query().Get("h"))
-		a.sendScreen(data, cw, ch)
+		a.sendScreen(data, cw, ch, r.URL.Query().Get("snap") == "1")
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
@@ -124,4 +124,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

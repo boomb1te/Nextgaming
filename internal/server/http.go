@@ -65,6 +65,12 @@ func (s *Server) routes() http.Handler {
 		return ok(), nil
 	})
 	mux.HandleFunc("GET /api/pcs/{id}/screen.jpg", s.handleScreenJPEG)
+	// One-off HD snapshot: POST asks the PC for a sharp frame; the GET polls for
+	// it (?since=<unix ms> returns 204 until a newer snapshot has arrived).
+	h("POST /api/pcs/{id}/snapshot", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return ok(), s.RequestSnapshot(pathID(r))
+	})
+	mux.HandleFunc("GET /api/pcs/{id}/snapshot.jpg", s.handleSnapshotJPEG)
 
 	h("POST /api/pcs/{id}/start", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		var req StartRequest
@@ -671,6 +677,25 @@ func (s *Server) handleScreenJPEG(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	f, ok := s.screens.get(pathID(r))
 	if !ok || len(f.data) == 0 || s.now().Sub(f.at) > screenStale {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Write(f.data)
+}
+
+// handleSnapshotJPEG serves the latest one-off HD snapshot for a PC, but only
+// once one captured after the most recent request has arrived (204 until then),
+// so the panel can poll right after asking for one. Freshness uses the server
+// clock only.
+func (s *Server) handleSnapshotJPEG(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.currentAdmin(r); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "please log in"})
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	f, ok := s.screens.readySnap(pathID(r), s.now())
+	if !ok {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

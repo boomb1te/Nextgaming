@@ -218,7 +218,11 @@ func (h *Hub) serve(ctx context.Context, raw net.Conn) {
 			}
 		case protocol.TypeScreenFrame:
 			if fr, err := protocol.Decode[protocol.ScreenFrame](env); err == nil {
-				h.srv.screens.store(pc.ID, fr.Data, fr.W, fr.H, time.Now())
+				if fr.Snap {
+					h.srv.screens.storeSnap(pc.ID, fr.Data, fr.W, fr.H, time.Now())
+				} else {
+					h.srv.screens.store(pc.ID, fr.Data, fr.W, fr.H, time.Now())
+				}
 			}
 		case protocol.TypeFSResult:
 			if res, err := protocol.Decode[protocol.FSResult](env); err == nil {

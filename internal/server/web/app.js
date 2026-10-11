@@ -916,7 +916,9 @@ function openScreenModal(id) {
   screenPost(true); // ask the server for a sharper, faster frame on this PC
   const img = h('img', { class: 'screen-big', alt: '' });
   const waiting = h('div', { class: 'screen-wait' }, 'Waiting for image…');
-  const body = h('div', { class: 'screen-big-wrap' }, img, waiting);
+  const snapBtn = h('button', { class: 'btn small', onclick: () => hdSnapshot(id, pc.name) }, '📷 HD snapshot');
+  const bar = h('div', { class: 'screen-bigbar' }, snapBtn, h('span', { class: 'muted small' }, 'Grabs one sharp, full-size image of this screen.'));
+  const body = h('div', null, bar, h('div', { class: 'screen-big-wrap' }, img, waiting));
   const m = modal(pc.name + ' — live screen', body);
   // Seed from the thumbnail immediately, then refresh at full rate.
   refreshScreen(id, img, waiting, SCREEN_FOCUS_MS * 3);
@@ -930,6 +932,50 @@ function openScreenModal(id) {
     if (S.screens) { S.screens.focus = 0; screenPost(true); }
   };
   S.screens.focusModal = m;
+}
+
+// hdSnapshot asks the PC for one full-resolution frame and shows it frozen
+// (not streamed). The server only serves a shot captured after this request,
+// so the admin's clock doesn't matter; we poll until it arrives.
+function hdSnapshot(id, name) {
+  const img = h('img', { class: 'screen-big', alt: '' });
+  const status = h('div', { class: 'screen-wait' }, 'Capturing a sharp image…');
+  const open = h('a', { class: 'btn small', target: '_blank', style: 'display:none' }, 'Open full size ↗');
+  const again = h('button', { class: 'btn small' }, 'New snapshot');
+  const m = modal(name + ' — HD snapshot', h('div', null,
+    h('div', { class: 'screen-bigbar' }, again, open),
+    h('div', { class: 'screen-big-wrap' }, img, status)));
+  const baseClose = m.close;
+  m.close = () => { if (img.dataset.url) URL.revokeObjectURL(img.dataset.url); baseClose(); };
+  again.onclick = () => run();
+  async function run() {
+    status.style.display = 'flex'; status.textContent = 'Capturing a sharp image…'; img.classList.remove('has');
+    try { await api('POST', `/api/pcs/${id}/snapshot`); }
+    catch (e) { status.textContent = e.message; return; }
+    const deadline = Date.now() + 12000;
+    const tick = async () => {
+      if (!document.body.contains(m.box)) return;
+      try {
+        const res = await fetch(`/api/pcs/${id}/snapshot.jpg?t=${Date.now()}`, { credentials: 'same-origin' });
+        if (res.status === 200) {
+          const blob = await res.blob();
+          if (blob.size) {
+            const url = URL.createObjectURL(blob);
+            const old = img.dataset.url;
+            img.src = url; img.dataset.url = url; img.classList.add('has');
+            open.href = url; open.style.display = '';
+            status.style.display = 'none';
+            if (old) URL.revokeObjectURL(old);
+            return;
+          }
+        }
+      } catch (e) { /* retry */ }
+      if (Date.now() < deadline) setTimeout(tick, 500);
+      else status.textContent = 'Couldn’t get a snapshot (the PC may be busy or a game is in exclusive fullscreen). Try again.';
+    };
+    setTimeout(tick, 400);
+  }
+  run();
 }
 
 function screensStop() {

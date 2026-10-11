@@ -152,6 +152,7 @@ type Agent struct {
 	capSeq  int64
 	capW    int
 	capQ    int
+	capSnap bool
 	capWake chan struct{}
 
 	now func() time.Time
@@ -526,7 +527,7 @@ func (a *Agent) handle(conn *protocol.Conn, env protocol.Envelope) {
 	case protocol.TypeCapture:
 		req, err := protocol.Decode[protocol.CaptureRequest](env)
 		if err == nil {
-			a.requestCapture(req.Width, req.Quality)
+			a.requestCapture(req.Width, req.Quality, req.Snap)
 		}
 	case protocol.TypeFSList:
 		req, _ := protocol.Decode[protocol.FSListRequest](env)
@@ -557,13 +558,13 @@ func (a *Agent) handle(conn *protocol.Conn, env protocol.Envelope) {
 
 // requestCapture records the server's capture parameters and wakes the lock
 // screen's /capture-wait long-poll so it grabs a frame immediately.
-func (a *Agent) requestCapture(width, quality int) {
+func (a *Agent) requestCapture(width, quality int, snap bool) {
 	if width <= 0 {
 		return
 	}
 	a.capMu.Lock()
 	a.capSeq++
-	a.capW, a.capQ = width, quality
+	a.capW, a.capQ, a.capSnap = width, quality, snap
 	old := a.capWake
 	a.capWake = make(chan struct{})
 	a.capMu.Unlock()
@@ -571,12 +572,12 @@ func (a *Agent) requestCapture(width, quality int) {
 }
 
 // sendScreen relays one captured frame from the lock screen to the server.
-func (a *Agent) sendScreen(data []byte, w, h int) {
+func (a *Agent) sendScreen(data []byte, w, h int, snap bool) {
 	a.mu.Lock()
 	conn := a.conn
 	a.mu.Unlock()
 	if conn != nil {
-		conn.Send(protocol.TypeScreenFrame, "", protocol.ScreenFrame{Data: data, W: w, H: h})
+		conn.Send(protocol.TypeScreenFrame, "", protocol.ScreenFrame{Data: data, W: w, H: h, Snap: snap})
 	}
 }
 
