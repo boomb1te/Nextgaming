@@ -84,7 +84,8 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - This feature is **local-network only** and is deliberately excluded from any future remote/online build.
 
 **Networks and VPNs**
-- NextGaming only talks on the club's local network, so game VPNs players run do not affect it. VPN and virtual adapters are ignored when identifying a PC.
+- NextGaming talks only on the club's local network, and VPN/virtual adapters are ignored when identifying a PC (so a PC never appears twice because of one).
+- **A player's VPN is fine as long as it is split-tunnel.** A *full-tunnel* VPN (all traffic through the VPN, e.g. AmneziaVPN by default) swallows the club LAN and makes the PC show "offline during a session" — exclude the club subnet from the VPN to fix it. See **Installing → Each gaming PC → step 4**.
 
 **Staff at a gaming PC**
 - A staff member at a locked gaming PC clicks the **Staff log in** button on the lock screen (or presses Ctrl+Alt+L), enters their NextGaming username and password, and the PC unlocks as a staff (free) session — no walking back to the desk. No browser opens and the desktop is never exposed.
@@ -151,6 +152,13 @@ Give the front-desk PC a fixed IP address in the router (so gaming PCs always fi
    powershell -ExecutionPolicy Bypass -File harden-gamer-account.ps1 -Apply  # applies restrictions
    ```
    Keep a separate Administrator account with a password for maintenance. `-Undo` reverses it.
+4. **If the PC uses a VPN (players often run one for FACEIT) — set it to split-tunnel.** This step is mandatory on any PC where a VPN will be switched on, or NextGaming will lose that PC.
+   - **The problem:** a *full-tunnel* VPN routes **all** traffic through the VPN, including the club LAN. The agent can then no longer reach the server, so the panel shows the PC **"offline during a session"** even though it is on and the player is gaming. AmneziaVPN (which uses its own network adapter) does this by default.
+   - **The fix — exclude the club network from the VPN.** In AmneziaVPN (Russian UI): open the connection's split-tunnel / sites settings, set the mode to **«Весь трафик, кроме указанного»** (all traffic *except* the list), and add your **club subnet**, e.g. `192.168.1.0/24`. Match it to your server's IP — if the server is `192.168.1.10`, the subnet is `192.168.1.0/24`. FACEIT and everything else still go through the VPN as normal; only club-LAN traffic skips it.
+   - **Alternative (per-app):** instead of a subnet, exclude the apps `nextgaming-agent.exe` and `nextgaming-client.exe` from the VPN. The subnet method is simpler and usually better.
+   - **Check:** with the VPN **on**, the gaming PC must still open the panel / reach the server. If its tile stays green and the session keeps counting while the VPN is connected, you're set.
+   - **Tailscale and other split-tunnel VPNs** need no change — they already leave the LAN alone.
+   - **Same warning for the front-desk PC:** never run a full-tunnel VPN there. It severs the server from *every* agent at once and breaks Wake-on-LAN (the magic packet must go out on the club LAN adapter). If you must, exclude the club subnet there too.
 
 ### 3. Wake-on-LAN
 
