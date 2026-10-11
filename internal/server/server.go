@@ -24,13 +24,14 @@ var Version = "1.0.0"
 
 // Server is the running NextGaming server.
 type Server struct {
-	cfg     Config
-	st      *store.Store
-	hub     *Hub
-	logins  *Sessions
+	cfg       Config
+	st        *store.Store
+	hub       *Hub
+	logins    *Sessions
 	bus       *Bus
 	screens   *screens
 	transfers *transfers
+	calls     *calls
 
 	// mu serialises every state-changing operation so two admins clicking at
 	// once can never double-start a PC or double-charge a session.
@@ -94,6 +95,7 @@ func New(cfg Config) (*Server, error) {
 	s.bus = newBus(s)
 	s.screens = newScreens()
 	s.transfers = newTransfers(s)
+	s.calls = newCalls(s)
 	if s.settings, err = store.LoadSettings(st.DB); err != nil {
 		return nil, err
 	}

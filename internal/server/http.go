@@ -411,6 +411,23 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/fs/serve/{token}", s.handleFSServe)
 	mux.HandleFunc("POST /api/fs/recv/{token}", s.handleFSRecv)
 
+	// Incoming calls (LAN only). The operator phone posts an answered call's
+	// number here (club key in X-NextGaming-Phone, not the admin cookie).
+	mux.HandleFunc("POST /api/phone/call", s.handlePhoneCall)
+	// Operator dismisses a pending-call prompt (booked it or declined).
+	h("POST /api/calls/{id}/dismiss", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		s.DismissCall(pathID(r))
+		return ok(), nil
+	})
+	// Dev/test: simulate an incoming call from the panel itself (no phone needed).
+	h("POST /api/calls/simulate", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct{ Number string }
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return ok(), s.RecordIncomingCall(req.Number)
+	})
+
 	h("GET /api/admins", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		return store.ListAdmins(s.st.DB)
 	})

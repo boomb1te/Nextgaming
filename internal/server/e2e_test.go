@@ -903,3 +903,65 @@ func TestCallMatchingAndDuplicates(t *testing.T) {
 	}
 	_ = dupID
 }
+
+func TestIncomingCallFlow(t *testing.T) {
+	e := setup(t, 0)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+
+	phoneCall := func(number, key string) int {
+		req, _ := http.NewRequest("POST", e.base+"/api/phone/call?number="+url.QueryEscape(number), nil)
+		req.Header.Set("X-NextGaming-Phone", key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Wrong key is rejected.
+	if code := phoneCall("+99365123456", "wrong-key"); code != http.StatusForbidden {
+		t.Fatalf("wrong key: status %d, want 403", code)
+	}
+
+	// An answered call from an unknown number becomes a pending prompt.
+	if code := phoneCall("+993 65 12 34 56", e.s.cfg.ClubKey); code != 200 {
+		t.Fatalf("call: status %d", code)
+	}
+	snap := e.snapshot()
+	if len(snap.PendingCalls) != 1 || snap.PendingCalls[0].ClientID != 0 || snap.PendingCalls[0].Number != "+99365123456" {
+		t.Fatalf("pending calls = %+v", snap.PendingCalls)
+	}
+	callID := snap.PendingCalls[0].ID
+
+	// Adding the caller as a client resolves the same prompt to them (live match).
+	var c struct{ ID int64 }
+	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "065123456"}, &c)
+	snap = e.snapshot()
+	if len(snap.PendingCalls) != 1 || snap.PendingCalls[0].ClientID != c.ID || snap.PendingCalls[0].ClientName != "Merdan" {
+		t.Fatalf("pending call after add = %+v", snap.PendingCalls)
+	}
+
+	// A repeat call from the same number coalesces into one prompt.
+	phoneCall("65123456", e.s.cfg.ClubKey)
+	if snap = e.snapshot(); len(snap.PendingCalls) != 1 {
+		t.Fatalf("repeat call should coalesce, got %d prompts", len(snap.PendingCalls))
+	}
+
+	// Dismiss clears it.
+	e.must("POST", fmt.Sprintf("/api/calls/%d/dismiss", callID), nil, nil)
+	if snap = e.snapshot(); len(snap.PendingCalls) != 0 {
+		t.Fatalf("after dismiss: %+v", snap.PendingCalls)
+	}
+
+	// An unusable number is refused.
+	if code := phoneCall("123", e.s.cfg.ClubKey); code == 200 {
+		t.Fatal("unusable number should be rejected")
+	}
+
+	// The in-panel simulate endpoint (admin-authed) records a call too.
+	e.must("POST", "/api/calls/simulate", map[string]string{"number": "65777777"}, nil)
+	if snap = e.snapshot(); len(snap.PendingCalls) != 1 || snap.PendingCalls[0].Number != "+99365777777" {
+		t.Fatalf("simulate: %+v", snap.PendingCalls)
+	}
+}

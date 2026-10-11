@@ -58,6 +58,9 @@ type Snapshot struct {
 	PCs        []PCView       `json:"pcs"`
 	Shift      *ShiftView     `json:"shift"`
 	Alerts     []Alert        `json:"alerts"`
+	// PendingCalls are answered incoming calls awaiting the operator's action
+	// (book for this caller / dismiss). See internal/server/calls.go.
+	PendingCalls []PendingCallView `json:"pendingCalls"`
 }
 
 // BuildSnapshot assembles the current state.
@@ -126,6 +129,7 @@ func (s *Server) BuildSnapshot() (*Snapshot, error) {
 		}
 		snap.PCs = append(snap.PCs, v)
 	}
+	snap.PendingCalls = s.pendingCallViews()
 	return snap, nil
 }
 
