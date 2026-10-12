@@ -997,15 +997,35 @@ function controlControl(id, pc) {
   return h('button', { class: 'btn small primary', onclick: () => controlModal(id, pc.name) }, '🖱 Take control');
 }
 
-// controlModal shows the PC at ~0.5s and relays your mouse to it. Mouse now;
-// keyboard in stage 2. Closing releases control.
+// Windows virtual-key codes for the common keys + modifiers we forward. Keys
+// not here are left to the browser (exotic keys aren't supported, by design).
+const CONTROL_VK = {
+  Backspace: 8, Tab: 9, Enter: 13, Escape: 27, Space: 32, CapsLock: 0x14,
+  ShiftLeft: 0xA0, ShiftRight: 0xA1, ControlLeft: 0xA2, ControlRight: 0xA3,
+  AltLeft: 0xA4, AltRight: 0xA5, MetaLeft: 0x5B, MetaRight: 0x5C,
+  ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28,
+  Home: 0x24, End: 0x23, PageUp: 0x21, PageDown: 0x22, Insert: 0x2D, Delete: 0x2E,
+  Minus: 0xBD, Equal: 0xBB, BracketLeft: 0xDB, BracketRight: 0xDD, Backslash: 0xDC,
+  Semicolon: 0xBA, Quote: 0xDE, Backquote: 0xC0, Comma: 0xBC, Period: 0xBE, Slash: 0xBF,
+};
+function controlVk(code) {
+  if (CONTROL_VK[code] != null) return CONTROL_VK[code];
+  if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3);          // A..Z -> 0x41..
+  if (/^Digit[0-9]$/.test(code)) return code.charCodeAt(5);        // 0..9 -> 0x30..
+  if (/^F([1-9]|1[0-2])$/.test(code)) return 0x70 + (+code.slice(1) - 1); // F1..F12
+  if (/^Numpad[0-9]$/.test(code)) return 0x60 + (code.charCodeAt(6) - 48);
+  return 0;
+}
+
+// controlModal shows the PC at ~0.5s and relays your mouse and keyboard to it.
+// Closing releases control.
 function controlModal(id, name) {
   const img = h('img', { class: 'control-img', alt: '', draggable: false });
   const waiting = h('div', { class: 'screen-wait' }, 'Connecting…');
   const surface = h('div', { class: 'control-surface' }, img, waiting);
   const m = modal(name + ' — remote control', h('div', null,
     h('div', { class: 'screen-bigbar' }, fullscreenButton(surface),
-      h('span', { class: 'muted small' }, 'Your mouse drives this PC (about half a second behind). The player’s mouse & keyboard are blocked while you control. Close to release.')),
+      h('span', { class: 'muted small' }, 'Your mouse and keyboard drive this PC (about half a second behind). The player’s mouse & keyboard are blocked while you control. Close to release.')),
     surface));
 
   let running = true;
@@ -1023,6 +1043,19 @@ function controlModal(id, name) {
   img.addEventListener('mouseup', e => { e.preventDefault(); const p = norm(e); buf.push({ kind: 'up', button: btnName(e.button), x: p.x, y: p.y }); sendNow(); });
   img.addEventListener('contextmenu', e => e.preventDefault());
   img.addEventListener('wheel', e => { e.preventDefault(); const p = norm(e); buf.push({ kind: 'wheel', dir: e.deltaY > 0 ? -1 : 1, x: p.x, y: p.y }); sendNow(); }, { passive: false });
+
+  // Keyboard: forward mapped keys to the PC (capture phase so they reach the PC
+  // instead of the browser/modal — e.g. Esc goes to the PC, close with the X).
+  const onKey = e => {
+    const vk = controlVk(e.code);
+    if (!vk) return; // unmapped key stays with the browser
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    buf.push({ kind: 'key', vk, keyDown: e.type === 'keydown' });
+    sendNow();
+  };
+  document.addEventListener('keydown', onKey, true);
+  document.addEventListener('keyup', onKey, true);
 
   const flush = setInterval(sendNow, 50);
   const beat = setInterval(() => { if (running) api('POST', `/api/pcs/${id}/control`, { active: true }).catch(() => {}); }, 3000);
@@ -1044,6 +1077,8 @@ function controlModal(id, name) {
     if (!running) return;
     running = false;
     clearInterval(flush); clearInterval(beat); clearInterval(poll);
+    document.removeEventListener('keydown', onKey, true);
+    document.removeEventListener('keyup', onKey, true);
     if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
     api('POST', `/api/pcs/${id}/control`, { active: false }).catch(() => {});
   };

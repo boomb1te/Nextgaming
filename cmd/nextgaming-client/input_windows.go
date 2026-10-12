@@ -92,6 +92,10 @@ func injectEvent(ev protocol.InputEvent) {
 		sendMouse(ev.X, ev.Y, flags, 0)
 	case "wheel":
 		sendMouse(ev.X, ev.Y, inWheelFlag|inMoveFlag|inAbsoluteFlag, uint32(int32(ev.Dir*inWheelDelta)))
+	case "key":
+		if ev.Vk != 0 {
+			sendKey(uint16(ev.Vk), ev.Down)
+		}
 	case "block":
 		// Block the player's physical input for a short window; control pings keep
 		// refreshing it, so it auto-releases if control stops.
@@ -160,6 +164,50 @@ func startInputBlocker() {
 			return
 		}
 	}
+}
+
+const (
+	inINPUTKbd      = 1
+	inKeyEventKeyUp = 0x0002
+	inKeyEventExt   = 0x0001
+)
+
+// kbdInput is the Win32 INPUT struct for a keyboard event, padded to the same
+// 40 bytes as the mouse INPUT (SendInput's cbSize is the size of INPUT).
+type kbdInput struct {
+	typ     uint32
+	_       uint32
+	wVk     uint16
+	wScan   uint16
+	dwFlags uint32
+	time    uint32
+	_       uint32
+	dwExtra uintptr
+	_       uint64 // pad to 40 bytes (mouse INPUT is larger)
+}
+
+// extendedVK is the set of virtual keys that must carry the EXTENDEDKEY flag
+// (navigation cluster, right-hand modifiers, Win keys) to inject correctly.
+var extendedVK = map[uint16]bool{
+	0x21: true, 0x22: true, 0x23: true, 0x24: true, // PageUp/Down, End, Home
+	0x25: true, 0x26: true, 0x27: true, 0x28: true, // arrows
+	0x2D: true, 0x2E: true, // Insert, Delete
+	0xA3: true, 0xA5: true, // right Ctrl, right Alt
+	0x5B: true, 0x5C: true, // left/right Win
+	0x90: true, // NumLock
+}
+
+// sendKey injects one key press (down) or release (up).
+func sendKey(vk uint16, down bool) {
+	flags := uint32(0)
+	if !down {
+		flags |= inKeyEventKeyUp
+	}
+	if extendedVK[vk] {
+		flags |= inKeyEventExt
+	}
+	in := kbdInput{typ: inINPUTKbd, wVk: vk, dwFlags: flags}
+	pSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
 }
 
 func pick(down bool, d, u uint32) uint32 {

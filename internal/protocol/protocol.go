@@ -263,14 +263,10 @@ type InputEvent struct {
 	Y      float64 `json:"y,omitempty"`      // 0..1 down the screen (mouse)
 	Button string  `json:"button,omitempty"` // left | right | middle (down/up)
 	Dir    int     `json:"dir,omitempty"`    // wheel notches: + up, - down
-	// Keyboard (stage 2): a key code and modifiers; unused by mouse events.
-	Code  string `json:"code,omitempty"` // a JS KeyboardEvent.code, mapped on the PC
-	Text  string `json:"text,omitempty"` // a typed character, when it is plain text
-	Down  bool   `json:"keyDown,omitempty"`
-	Ctrl  bool   `json:"ctrl,omitempty"`
-	Alt   bool   `json:"alt,omitempty"`
-	Shift bool   `json:"shift,omitempty"`
-	Meta  bool   `json:"meta,omitempty"`
+	// Keyboard (kind == "key"): a Windows virtual-key code (mapped in the
+	// browser) and whether this is a press (Down) or a release.
+	Vk   int  `json:"vk,omitempty"`
+	Down bool `json:"keyDown,omitempty"`
 }
 
 // InputBatch is a group of input events relayed together (server -> agent).

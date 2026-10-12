@@ -1097,6 +1097,8 @@ func TestRemoteControlInput(t *testing.T) {
 		{"kind": "move", "x": 0.5, "y": 0.5},
 		{"kind": "down", "button": "left", "x": 0.5, "y": 0.5},
 		{"kind": "up", "button": "left", "x": 0.5, "y": 0.5},
+		{"kind": "key", "vk": 13, "keyDown": true},
+		{"kind": "key", "vk": 13, "keyDown": false},
 	}}, nil)
 
 	eventually(t, "the PC receives the input events", func() bool {
@@ -1110,6 +1112,19 @@ func TestRemoteControlInput(t *testing.T) {
 		}
 		return len(mouse) >= 3 && mouse[0].Kind == "move" && mouse[1].Kind == "down" && mouse[1].Button == "left"
 	})
+
+	// A key event (Enter) also reaches the PC.
+	mu.Lock()
+	var key bool
+	for _, e := range got {
+		if e.Kind == "key" && e.Vk == 13 && e.Down {
+			key = true
+		}
+	}
+	mu.Unlock()
+	if !key {
+		t.Fatal("expected the key event to reach the PC")
+	}
 
 	// Taking control also told the PC to block the player's physical input.
 	mu.Lock()
