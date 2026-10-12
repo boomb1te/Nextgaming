@@ -32,10 +32,10 @@ const (
 	snapStale   = 2 * time.Minute // a snapshot older than this is not served
 
 	// Remote control: a ~0.5s refresh is plenty (control is for fixing things,
-	// not gaming), at a readable mid resolution/quality.
+	// not gaming), at a clearly-readable resolution (above 720p) and quality.
 	controlEvery   = 500 * time.Millisecond
-	controlWidth   = 1280
-	controlQuality = 55
+	controlWidth   = 1600
+	controlQuality = 72
 	controlTTL     = 8 * time.Second // control stops this long after the last ping
 )
 
@@ -213,9 +213,12 @@ func (s *Server) screenLoop(ctx context.Context) {
 				continue
 			}
 			foc := s.screens.focusPC(now)
+			cp := s.screens.controlledPC(now)
 			for _, id := range s.hub.OnlineIDs() {
-				if id == foc {
-					continue // the focused PC gets a hi-res frame on its own cadence
+				// The focused and the controlled PC get their own hi-res frames;
+				// never overwrite them with a tiny thumbnail.
+				if id == foc || id == cp {
+					continue
 				}
 				s.hub.Send(id, protocol.TypeCapture, protocol.CaptureRequest{Width: thumbWidth, Quality: thumbQuality})
 			}
@@ -227,6 +230,9 @@ func (s *Server) screenLoop(ctx context.Context) {
 			foc := s.screens.focusPC(now)
 			if foc == 0 || !s.hub.Online(foc) {
 				continue
+			}
+			if foc == s.screens.controlledPC(now) {
+				continue // the control loop already captures it at a higher rate/quality
 			}
 			s.hub.Send(foc, protocol.TypeCapture, protocol.CaptureRequest{Width: focusWidth, Quality: focusQuality})
 		}
