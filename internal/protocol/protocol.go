@@ -49,6 +49,7 @@ const (
 	TypeWoLCheck  = "wol_check"
 	TypeUninstall = "uninstall" // the PC was removed in the admin panel
 	TypeCapture   = "capture"   // capture one screen frame now (screen monitoring)
+	TypeInput     = "input"     // remote control: inject mouse/keyboard on the PC
 	TypeFSList    = "fs_list"   // list the PC's shared folder (reply carries the listing in the Ack)
 	TypeFSPush    = "fs_push"   // download a file from the server into the shared folder
 	TypeFSPull    = "fs_pull"   // upload a file from the shared folder to the server
@@ -246,6 +247,35 @@ type ScreenFrame struct {
 	W    int    `json:"w"`
 	H    int    `json:"h"`
 	Snap bool   `json:"snap,omitempty"` // this frame answers a one-off HD snapshot request
+}
+
+// ---- remote control (LAN only) ----
+//
+// The admin's mouse/keyboard events are relayed to the PC and injected by the
+// user-session capture helper (the one process that can drive the real desktop).
+// Coordinates are normalised 0..1 of the screen, so they are resolution- and
+// scaling-independent — the helper multiplies by its own screen size.
+
+// InputEvent is one mouse or keyboard action to inject on the PC.
+type InputEvent struct {
+	Kind   string  `json:"kind"`             // move | down | up | wheel | key
+	X      float64 `json:"x,omitempty"`      // 0..1 across the screen (mouse)
+	Y      float64 `json:"y,omitempty"`      // 0..1 down the screen (mouse)
+	Button string  `json:"button,omitempty"` // left | right | middle (down/up)
+	Dir    int     `json:"dir,omitempty"`    // wheel notches: + up, - down
+	// Keyboard (stage 2): a key code and modifiers; unused by mouse events.
+	Code  string `json:"code,omitempty"` // a JS KeyboardEvent.code, mapped on the PC
+	Text  string `json:"text,omitempty"` // a typed character, when it is plain text
+	Down  bool   `json:"keyDown,omitempty"`
+	Ctrl  bool   `json:"ctrl,omitempty"`
+	Alt   bool   `json:"alt,omitempty"`
+	Shift bool   `json:"shift,omitempty"`
+	Meta  bool   `json:"meta,omitempty"`
+}
+
+// InputBatch is a group of input events relayed together (server -> agent).
+type InputBatch struct {
+	Events []InputEvent `json:"events"`
 }
 
 // WoLCheck asks the agent to check (and optionally fix) its Wake-on-LAN setup.

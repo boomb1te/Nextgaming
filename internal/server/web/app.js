@@ -68,6 +68,7 @@ function fmtBytes(n) {
 function timeStr(t) { const d = new Date(t); return isNaN(d) || d.getFullYear() < 2000 ? '—' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 function dateTimeStr(t) { const d = new Date(t); return isNaN(d) || d.getFullYear() < 2000 ? '—' : d.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }); }
 function isOwner() { return S.me && S.me.role === 'owner'; }
+function isTouchDevice() { try { return !!(window.matchMedia && matchMedia('(pointer: coarse)').matches); } catch (e) { return false; } }
 function pcById(id) { return S.snap && S.snap.pcs.find(p => p.id === id); }
 function zoneById(id) { return S.snap && S.snap.zones.find(z => z.id === id); }
 
@@ -917,7 +918,7 @@ function openScreenModal(id) {
   const img = h('img', { class: 'screen-big', alt: '' });
   const waiting = h('div', { class: 'screen-wait' }, 'Waiting for image…');
   const snapBtn = h('button', { class: 'btn small', onclick: () => hdSnapshot(id, pc.name) }, '📷 HD snapshot');
-  const bar = h('div', { class: 'screen-bigbar' }, snapBtn, h('span', { class: 'muted small' }, 'Grabs one sharp, full-size image of this screen.'));
+  const bar = h('div', { class: 'screen-bigbar' }, snapBtn, controlControl(id, pc));
   const body = h('div', null, bar, h('div', { class: 'screen-big-wrap' }, img, waiting));
   const m = modal(pc.name + ' — live screen', body);
   // Seed from the thumbnail immediately, then refresh at full rate.
@@ -976,6 +977,74 @@ function hdSnapshot(id, name) {
     setTimeout(tick, 400);
   }
   run();
+}
+
+// controlControl decides what the enlarged view shows for remote control:
+// the button on a computer with an unlocked online PC, otherwise a short note
+// (phones can't drive a PC; a locked PC has nothing useful to control).
+function controlControl(id, pc) {
+  if (isTouchDevice()) return h('span', { class: 'muted small' }, 'Remote control needs a computer with a mouse & keyboard.');
+  if (!pc.runtime || !pc.runtime.online) return h('span', { class: 'muted small' }, 'PC is offline.');
+  if (pc.runtime.locked) return h('span', { class: 'muted small' }, 'Unlock the PC to take control.');
+  return h('button', { class: 'btn small primary', onclick: () => controlModal(id, pc.name) }, '🖱 Take control');
+}
+
+// controlModal shows the PC at ~0.5s and relays your mouse to it. Mouse now;
+// keyboard in stage 2. Closing releases control.
+function controlModal(id, name) {
+  const img = h('img', { class: 'control-img', alt: '', draggable: false });
+  const waiting = h('div', { class: 'screen-wait' }, 'Connecting…');
+  const surface = h('div', { class: 'control-surface' }, img, waiting);
+  const m = modal(name + ' — remote control', h('div', null,
+    h('div', { class: 'muted small', style: 'margin-bottom:6px' }, 'Your mouse drives this PC (about half a second behind). Close this window to release it.'),
+    surface));
+
+  let running = true;
+  let buf = [], pendingMove = null;
+  const norm = e => { const r = img.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }; };
+  const btnName = b => (b === 2 ? 'right' : (b === 1 ? 'middle' : 'left'));
+  const sendNow = () => {
+    if (pendingMove) { buf.push({ kind: 'move', x: pendingMove.x, y: pendingMove.y }); pendingMove = null; }
+    if (!buf.length) return;
+    const events = buf; buf = [];
+    api('POST', `/api/pcs/${id}/control/input`, { events }).catch(() => {});
+  };
+  img.addEventListener('mousemove', e => { pendingMove = norm(e); });
+  img.addEventListener('mousedown', e => { e.preventDefault(); const p = norm(e); buf.push({ kind: 'down', button: btnName(e.button), x: p.x, y: p.y }); sendNow(); });
+  img.addEventListener('mouseup', e => { e.preventDefault(); const p = norm(e); buf.push({ kind: 'up', button: btnName(e.button), x: p.x, y: p.y }); sendNow(); });
+  img.addEventListener('contextmenu', e => e.preventDefault());
+  img.addEventListener('wheel', e => { e.preventDefault(); const p = norm(e); buf.push({ kind: 'wheel', dir: e.deltaY > 0 ? -1 : 1, x: p.x, y: p.y }); sendNow(); }, { passive: false });
+
+  const flush = setInterval(sendNow, 50);
+  const beat = setInterval(() => { if (running) api('POST', `/api/pcs/${id}/control`, { active: true }).catch(() => {}); }, 3000);
+  const poll = setInterval(async () => {
+    if (!running) return;
+    try {
+      const res = await fetch(`/api/pcs/${id}/screen.jpg?control=1&t=${Date.now()}`, { credentials: 'same-origin' });
+      if (res.status !== 200) return;
+      const blob = await res.blob();
+      if (!blob.size) return;
+      const url = URL.createObjectURL(blob);
+      const old = img.dataset.url;
+      img.src = url; img.dataset.url = url; img.classList.add('has'); waiting.style.display = 'none';
+      if (old) URL.revokeObjectURL(old);
+    } catch (e) { /* retry next tick */ }
+  }, 500);
+
+  const stop = () => {
+    if (!running) return;
+    running = false;
+    clearInterval(flush); clearInterval(beat); clearInterval(poll);
+    if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+    api('POST', `/api/pcs/${id}/control`, { active: false }).catch(() => {});
+  };
+  const baseClose = m.close;
+  m.close = () => { stop(); baseClose(); };
+  const obs = new MutationObserver(() => { if (!document.body.contains(m.box)) { obs.disconnect(); stop(); } });
+  obs.observe(document.getElementById('modal-root'), { childList: true });
+
+  // Start control; if the server refuses (locked/offline), close.
+  api('POST', `/api/pcs/${id}/control`, { active: true }).catch(e => { toast(e.message, 'error'); m.close(); });
 }
 
 function screensStop() {

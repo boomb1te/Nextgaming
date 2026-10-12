@@ -71,6 +71,25 @@ func (s *Server) routes() http.Handler {
 		return ok(), s.RequestSnapshot(pathID(r))
 	})
 	mux.HandleFunc("GET /api/pcs/{id}/snapshot.jpg", s.handleSnapshotJPEG)
+	// Remote control (LAN only). Start/stop + ping with {active}, and relay input.
+	h("POST /api/pcs/{id}/control", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct {
+			Active bool `json:"active"`
+		}
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return ok(), s.SetControl(pathID(r), req.Active)
+	})
+	h("POST /api/pcs/{id}/control/input", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct {
+			Events []protocol.InputEvent `json:"events"`
+		}
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return ok(), s.SendControlInput(pathID(r), req.Events)
+	})
 
 	h("POST /api/pcs/{id}/start", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		var req StartRequest
@@ -674,7 +693,11 @@ func (s *Server) handleScreenJPEG(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "please log in"})
 		return
 	}
-	s.screens.keepAlive(s.now())
+	// A control-view poll shouldn't switch on grid-wide capturing; only a real
+	// Screens-grid poll keeps monitoring alive.
+	if r.URL.Query().Get("control") != "1" {
+		s.screens.keepAlive(s.now())
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	f, ok := s.screens.get(pathID(r))
 	if !ok || len(f.data) == 0 || s.now().Sub(f.at) > screenStale {

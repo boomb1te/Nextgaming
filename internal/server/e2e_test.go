@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1045,5 +1046,68 @@ func TestPhoneCallBrowserGet(t *testing.T) {
 	// Wrong key in the URL is refused.
 	if code := get("number=65121213&key=nope"); code != http.StatusForbidden {
 		t.Fatalf("GET wrong key: status %d, want 403", code)
+	}
+}
+
+func TestRemoteControlInput(t *testing.T) {
+	e := setup(t, 1)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	pc := e.pc("PC 1")
+	local := fmt.Sprintf("http://127.0.0.1:%d", e.ports[0])
+
+	// Control is refused while the PC is locked.
+	eventually(t, "PC 1 reports locked", func() bool { return e.s.hub.Runtime(pc.ID).Locked })
+	if err := e.call("POST", fmt.Sprintf("/api/pcs/%d/control", pc.ID), map[string]any{"active": true}, nil); err == nil {
+		t.Fatal("control on a locked PC should be refused")
+	}
+
+	// Unlock it with an open session.
+	e.must("POST", "/api/shift/open", map[string]any{"openingCash": 5000}, nil)
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/start", pc.ID), StartRequest{Mode: core.ModeOpen}, nil)
+	eventually(t, "PC 1 unlocks", func() bool { return !e.s.hub.Runtime(pc.ID).Locked })
+
+	// Stand in for the capture helper's input loop: drain /input-wait.
+	var mu sync.Mutex
+	var got []protocol.InputEvent
+	go func() {
+		for i := 0; i < 40; i++ {
+			req, _ := http.NewRequest("GET", local+"/input-wait", nil)
+			req.Header.Set("X-NextGaming-Client", "1")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			if resp.StatusCode != 200 {
+				resp.Body.Close()
+				continue
+			}
+			var b protocol.InputBatch
+			json.NewDecoder(resp.Body).Decode(&b)
+			resp.Body.Close()
+			mu.Lock()
+			got = append(got, b.Events...)
+			mu.Unlock()
+		}
+	}()
+
+	// Take control and send a click.
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/control", pc.ID), map[string]any{"active": true}, nil)
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/control/input", pc.ID), map[string]any{"events": []map[string]any{
+		{"kind": "move", "x": 0.5, "y": 0.5},
+		{"kind": "down", "button": "left", "x": 0.5, "y": 0.5},
+		{"kind": "up", "button": "left", "x": 0.5, "y": 0.5},
+	}}, nil)
+
+	eventually(t, "the PC receives the input events", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) >= 3 && got[0].Kind == "move" && got[1].Kind == "down" && got[1].Button == "left"
+	})
+
+	// Input is refused once control stops.
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/control", pc.ID), map[string]any{"active": false}, nil)
+	if err := e.call("POST", fmt.Sprintf("/api/pcs/%d/control/input", pc.ID), map[string]any{"events": []map[string]any{{"kind": "move", "x": 0.1, "y": 0.1}}}, nil); err == nil {
+		t.Fatal("input after releasing control should be refused")
 	}
 }

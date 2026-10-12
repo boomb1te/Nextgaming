@@ -155,12 +155,17 @@ type Agent struct {
 	capSnap bool
 	capWake chan struct{}
 
+	// remote control: queued input events the capture helper drains via /input-wait.
+	inpMu    sync.Mutex
+	inpQueue []protocol.InputEvent
+	inpWake  chan struct{}
+
 	now func() time.Time
 }
 
 // New prepares the agent.
 func New(cfg Config) *Agent {
-	a := &Agent{cfg: cfg, now: time.Now, pending: map[string]chan protocol.Ack{}, capWake: make(chan struct{})}
+	a := &Agent{cfg: cfg, now: time.Now, pending: map[string]chan protocol.Ack{}, capWake: make(chan struct{}), inpWake: make(chan struct{})}
 	a.st = localState{Locked: true}
 	a.loadState()
 	return a
@@ -529,6 +534,10 @@ func (a *Agent) handle(conn *protocol.Conn, env protocol.Envelope) {
 		if err == nil {
 			a.requestCapture(req.Width, req.Quality, req.Snap)
 		}
+	case protocol.TypeInput:
+		if b, err := protocol.Decode[protocol.InputBatch](env); err == nil {
+			a.enqueueInput(b.Events)
+		}
 	case protocol.TypeFSList:
 		req, _ := protocol.Decode[protocol.FSListRequest](env)
 		listing, err := a.fsList(req.Rel)
@@ -569,6 +578,32 @@ func (a *Agent) requestCapture(width, quality int, snap bool) {
 	a.capWake = make(chan struct{})
 	a.capMu.Unlock()
 	close(old) // release every waiting /capture-wait at once
+}
+
+// enqueueInput queues remote-control events and wakes the helper's /input-wait.
+func (a *Agent) enqueueInput(events []protocol.InputEvent) {
+	if len(events) == 0 {
+		return
+	}
+	a.inpMu.Lock()
+	a.inpQueue = append(a.inpQueue, events...)
+	// Bound the queue so a stuck helper can't make us grow without limit.
+	if len(a.inpQueue) > 2000 {
+		a.inpQueue = a.inpQueue[len(a.inpQueue)-2000:]
+	}
+	old := a.inpWake
+	a.inpWake = make(chan struct{})
+	a.inpMu.Unlock()
+	close(old)
+}
+
+// takeInput returns and clears the queued input events (called by /input-wait).
+func (a *Agent) takeInput() []protocol.InputEvent {
+	a.inpMu.Lock()
+	defer a.inpMu.Unlock()
+	ev := a.inpQueue
+	a.inpQueue = nil
+	return ev
 }
 
 // sendScreen relays one captured frame from the lock screen to the server.

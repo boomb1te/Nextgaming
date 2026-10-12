@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"nextgaming/internal/protocol"
 )
 
 // serveLocal starts the loopback-only API used by the lock screen.
@@ -62,6 +64,30 @@ func (a *Agent) serveLocal(ctx context.Context) error {
 		resp := map[string]int{"seq": int(a.capSeq), "width": a.capW, "quality": a.capQ, "snap": boolToInt(a.capSnap)}
 		a.capMu.Unlock()
 		writeJSON(w, http.StatusOK, resp)
+	})
+	// Remote control: the capture helper long-polls for queued input events and
+	// injects them. Returns immediately when events are waiting.
+	mux.HandleFunc("GET /input-wait", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-NextGaming-Client") != "1" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		if ev := a.takeInput(); len(ev) > 0 {
+			writeJSON(w, http.StatusOK, protocol.InputBatch{Events: ev})
+			return
+		}
+		a.inpMu.Lock()
+		wake := a.inpWake
+		a.inpMu.Unlock()
+		select {
+		case <-wake:
+		case <-r.Context().Done():
+			return
+		case <-time.After(25 * time.Second):
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeJSON(w, http.StatusOK, protocol.InputBatch{Events: a.takeInput()})
 	})
 	mux.HandleFunc("POST /screen", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-NextGaming-Client") != "1" {

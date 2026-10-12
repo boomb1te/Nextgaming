@@ -136,6 +136,12 @@ pre.cmd { background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 6px
 .screen-big-wrap { position: relative; width: 100%; background: #0b0e13; border-radius: 8px; min-height: 240px; display: flex; align-items: center; justify-content: center; }
 .screen-big { max-width: 100%; max-height: 72vh; display: block; }
 .screen-bigbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+/* Remote control surface: the image maps 1:1 to the PC screen (no letterboxing),
+   so pointer coordinates translate directly. */
+.control-surface { position: relative; width: 100%; background: #0b0e13; border-radius: 8px; min-height: 200px; display: flex; align-items: center; justify-content: center; }
+.control-img { width: 100%; height: auto; max-height: 78vh; display: none; cursor: crosshair; user-select: none; -webkit-user-drag: none; touch-action: none; }
+.control-img.has { display: block; }
+.modal:has(.control-surface) { max-width: 1100px; }
 .modal:has(.screen-big-wrap) { max-width: 1100px; }
 
 .tile .booked { font-size: 11px; color: var(--purple); font-weight: 600; }

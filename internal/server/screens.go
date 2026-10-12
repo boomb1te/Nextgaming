@@ -30,6 +30,13 @@ const (
 	snapWidth   = 4000
 	snapQuality = 90
 	snapStale   = 2 * time.Minute // a snapshot older than this is not served
+
+	// Remote control: a ~0.5s refresh is plenty (control is for fixing things,
+	// not gaming), at a readable mid resolution/quality.
+	controlEvery   = 500 * time.Millisecond
+	controlWidth   = 1280
+	controlQuality = 55
+	controlTTL     = 8 * time.Second // control stops this long after the last ping
 )
 
 type screenFrame struct {
@@ -49,6 +56,8 @@ type screens struct {
 	watchUntil time.Time
 	focus      int64
 	focusUntil time.Time
+	control    int64     // the PC currently under remote control (0 = none)
+	ctrlUntil  time.Time // control stops after this (refreshed by the panel's pings)
 }
 
 func newScreens() *screens {
@@ -157,16 +166,47 @@ func (sc *screens) focusPC(now time.Time) int64 {
 	return 0
 }
 
+// setControl marks a PC as under remote control and refreshes the timeout; the
+// panel calls it on start and as a periodic ping. pcID 0 (or active=false) ends it.
+func (sc *screens) setControl(pcID int64, now time.Time) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.control = pcID
+	if pcID != 0 {
+		sc.ctrlUntil = now.Add(controlTTL)
+	} else {
+		sc.ctrlUntil = time.Time{}
+	}
+}
+
+// controlledPC returns the PC under remote control right now, or 0.
+func (sc *screens) controlledPC(now time.Time) int64 {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if sc.control != 0 && now.Before(sc.ctrlUntil) {
+		return sc.control
+	}
+	return 0
+}
+
 // screenLoop broadcasts capture requests while someone is watching.
 func (s *Server) screenLoop(ctx context.Context) {
 	thumb := time.NewTicker(screenThumbEvery)
 	defer thumb.Stop()
 	focus := time.NewTicker(screenFocusEvery)
 	defer focus.Stop()
+	control := time.NewTicker(controlEvery)
+	defer control.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-control.C:
+			now := s.now()
+			cp := s.screens.controlledPC(now)
+			if cp != 0 && s.hub.Online(cp) {
+				s.hub.Send(cp, protocol.TypeCapture, protocol.CaptureRequest{Width: controlWidth, Quality: controlQuality})
+			}
 		case <-thumb.C:
 			now := s.now()
 			if !s.screens.watching(now) {
@@ -202,3 +242,43 @@ func (s *Server) RequestSnapshot(pcID int64) error {
 	s.screens.markSnapRequest(pcID, time.Now())
 	return s.hub.Send(pcID, protocol.TypeCapture, protocol.CaptureRequest{Width: snapWidth, Quality: snapQuality, Snap: true})
 }
+
+// SetControl starts/refreshes or stops remote control of a PC. The panel calls
+// it on entering control mode and as a periodic ping (active=true), and on
+// leaving (active=false). Control is refused while the PC is locked or offline.
+func (s *Server) SetControl(pcID int64, active bool) error {
+	if !active {
+		if s.screens.controlledPC(s.now()) == pcID {
+			s.screens.setControl(0, s.now())
+			s.changed()
+		}
+		return nil
+	}
+	if !s.hub.Online(pcID) {
+		return errConflict("%s is offline.", s.pcName(pcID))
+	}
+	if s.hub.Runtime(pcID).Locked {
+		return errConflict("%s is locked — unlock it to take control.", s.pcName(pcID))
+	}
+	first := s.screens.controlledPC(s.now()) != pcID
+	s.screens.setControl(pcID, s.now())
+	if first {
+		s.changed() // show the "being controlled" marker
+	}
+	return nil
+}
+
+// SendControlInput relays mouse/keyboard events to the PC currently controlled.
+func (s *Server) SendControlInput(pcID int64, events []protocol.InputEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	if s.screens.controlledPC(s.now()) != pcID {
+		return errConflict("not controlling that PC.")
+	}
+	s.screens.setControl(pcID, s.now()) // input also keeps control alive
+	return s.hub.Send(pcID, protocol.TypeInput, protocol.InputBatch{Events: events})
+}
+
+// ControlledPC reports which PC is under remote control (0 = none), for the snapshot.
+func (s *Server) ControlledPC() int64 { return s.screens.controlledPC(s.now()) }

@@ -48,7 +48,7 @@ The admin panel is a web page, so the owner can also open it from a phone on the
 - Capture uses the Desktop Duplication API (the real GPU output), so **borderless / windowed-fullscreen games are captured** and resolution changes are followed automatically; it falls back to a plain screen grab on older hardware or Remote Desktop
 - **True exclusive-fullscreen games cannot be captured** by any monitoring tool without injecting into the game — they show the desktop instead. Set games to borderless / windowed-fullscreen (most default to this) to see them on the grid
 - **HD snapshot**: click a PC to enlarge it, then **📷 HD snapshot** for one sharp, full-resolution still image (captured on demand, not streamed) — handy for reading fine detail. It opens frozen with an "Open full size" link; the live grid is unaffected
-- Taking control of a PC (remote mouse/keyboard) is a planned follow-up; today the Screens tab is view-only, and the PCs tab already locks, messages, or ends a session on any PC
+- **Take control** (LAN only): from a PC's enlarged view on a **computer** (not a phone — it needs a mouse), click **Take control** to drive that PC's **mouse** remotely at a ~0.5s refresh — for fixing something on a gaming PC without walking over. Available only while the PC is unlocked (in a session); input is injected by the user-session helper. Keyboard and an on-PC "staff is assisting" indicator are the next steps. A true exclusive-fullscreen game still can't be seen or controlled (borderless only)
 
 **Wake-on-LAN assistant**
 - The agent checks the Windows side (network card settings, "allow this device to wake the computer", Fast Startup, Ethernet vs Wi-Fi) and fixes it automatically

@@ -114,7 +114,9 @@ func main() {
 	// alongside the real lock screen which stays SYSTEM.
 	if *captureMode {
 		w.SetDPIAware()
-		(&app{port: *port}).captureLoop()
+		a := &app{port: *port}
+		go a.inputLoop() // remote control: inject mouse/keyboard events
+		a.captureLoop()
 		return
 	}
 
@@ -240,6 +242,33 @@ func (a *app) captureLoop() {
 		pr.Header.Set("Content-Type", "image/jpeg")
 		if rp, err := postClient.Do(pr); err == nil {
 			rp.Body.Close()
+		}
+	}
+}
+
+// inputLoop long-polls the agent for remote-control events (made only while an
+// admin is controlling this PC) and injects them. Mouse in stage 1; keyboard is
+// handled by injectEvent too (stage 2).
+func (a *app) inputLoop() {
+	base := fmt.Sprintf("http://127.0.0.1:%d", a.port)
+	client := &http.Client{Timeout: 30 * time.Second}
+	for {
+		req, _ := http.NewRequest("GET", base+"/input-wait", nil)
+		req.Header.Set("X-NextGaming-Client", "1")
+		resp, err := client.Do(req)
+		if err != nil {
+			time.Sleep(time.Second)
+			continue
+		}
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			continue // 204: nothing this round, poll again
+		}
+		var b protocol.InputBatch
+		json.NewDecoder(resp.Body).Decode(&b)
+		resp.Body.Close()
+		for _, ev := range b.Events {
+			injectEvent(ev)
 		}
 	}
 }
