@@ -46,20 +46,19 @@ Missed and outgoing calls are ignored.
 3. **Trigger** → **Phone/SMS** → **Call Ended**.
    - Set it to **Incoming** calls. (A missed call fires "Call Missed", not
      "Call Ended", so answered-only is automatic — exactly what we want.)
-4. **Action** → **Connectivity** → **HTTP Request**.
-   - **Method:** `POST`
-   - **URL:** type `http://<SERVER-IP>:8080/api/phone/call?number=` and then tap
-     the **magic-text button** (the `{ }` / `⚙` icon) and pick the **call
-     number** (MacroDroid inserts `[call_number]`). The finished URL looks like:
+4. **Action** → **Connectivity** → **HTTP Request** (method **GET**).
+   - **URL** — one line, no headers needed (the club key goes in the URL):
      ```
-     http://192.168.1.10:8080/api/phone/call?number=[call_number]
+     http://<SERVER-IP>:8080/api/phone/call?key=YOUR-CLUB-KEY&number=
      ```
-     (Use *your* server IP from the panel. The number's `+`/spaces don't matter —
-     the server reads the digits.)
-   - **Headers / Custom headers:** add one header
-     - Name: `X-NextGaming-Phone`
-     - Value: your **club key** (e.g. `K7P2-9QXA-M3TD`)
-   - Leave the body empty.
+     Then tap the **magic-text button** and pick the **call number**; MacroDroid
+     inserts it in curly braces, e.g. `{call_number}`. Finished URL:
+     ```
+     http://192.168.1.10:8080/api/phone/call?key=K7P2-9QXA-M3TD&number={call_number}
+     ```
+     Use *your* server IP and club key from the panel. The number's `+`/spaces
+     don't matter — the server reads the digits. **No custom header is required.**
+     (The older header method still works: header `X-NextGaming-Phone` = club key.)
 5. **Save** the macro and give it a name like "NextGaming booking line".
 6. Make sure MacroDroid is allowed to **run in the background** (disable battery
    optimisation for it) so it fires even when the screen is off.
@@ -73,6 +72,16 @@ That's it. The phone now tells the panel about every answered incoming call.
 **Without the phone first:** in the panel, **Settings → "Testing: simulate an
 incoming call"** — type a number and the prompt appears exactly as a real call
 would. Use this to confirm the booking flow before touching the phone.
+
+**From a browser (proves the phone can reach the server):** on the phone, on the
+club Wi-Fi, open this URL — if it works you'll see "NextGaming: call … received"
+and the prompt pops on the panel:
+```
+http://<SERVER-IP>:8080/api/phone/call?key=YOUR-CLUB-KEY&number=65121212
+```
+If that works, MacroDroid will work with the same URL (just `{call_number}` in
+place of the fixed number). If it shows a 404, the server is not updated to a
+build with this feature; if "wrong or missing club key", fix the key.
 
 **With the phone:** from another phone, call the operator phone, answer, then
 hang up. Within a second or two the prompt should appear at the top of the admin

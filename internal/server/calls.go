@@ -152,18 +152,43 @@ func (s *Server) RecordIncomingCall(number string) error {
 // DismissCall clears a pending call once the operator has handled it.
 func (s *Server) DismissCall(id int64) { s.calls.dismiss(id) }
 
-// phoneAuthed authorises the operator phone by the club key (LAN only, no cookie).
+// phoneAuthed authorises the operator phone by the club key (LAN only, no
+// cookie). The key may arrive in the X-NextGaming-Phone header or, so even a
+// plain URL (browser or a header-less automation app) works, as a ?key= param.
 func (s *Server) phoneAuthed(r *http.Request) bool {
 	key := r.Header.Get("X-NextGaming-Phone")
+	if key == "" {
+		key = r.URL.Query().Get("key")
+	}
 	return subtle.ConstantTimeCompare([]byte(key), []byte(s.cfg.ClubKey)) == 1
 }
 
 // handlePhoneCall receives an answered-incoming-call number from the operator
-// phone. The number may come as a ?number= query param or a JSON body, so the
-// phone-side automation (MacroDroid) can send it whichever way is easiest.
+// phone. Accepts GET or POST; the number comes as ?number= (or a JSON body) and
+// the key as the header or ?key=, so the phone side can be as simple as opening
+// one URL. On a GET it answers with a tiny human-readable page so a browser test
+// shows success or the exact error.
 func (s *Server) handlePhoneCall(w http.ResponseWriter, r *http.Request) {
+	browser := r.Method == http.MethodGet
+	reply := func(status int, okMsg, errMsg string) {
+		if browser {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(status)
+			if status == http.StatusOK {
+				w.Write([]byte("NextGaming: " + okMsg + "\n"))
+			} else {
+				w.Write([]byte("NextGaming error: " + errMsg + "\n"))
+			}
+			return
+		}
+		if status == http.StatusOK {
+			writeJSON(w, status, ok())
+		} else {
+			http.Error(w, errMsg, status)
+		}
+	}
 	if !s.phoneAuthed(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		reply(http.StatusForbidden, "", "wrong or missing club key")
 		return
 	}
 	number := r.URL.Query().Get("number")
@@ -171,15 +196,12 @@ func (s *Server) handlePhoneCall(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Number string `json:"number"`
 		}
-		if err := decode(r, &req); err != nil {
-			writeErr(w, err)
-			return
-		}
+		decode(r, &req)
 		number = req.Number
 	}
 	if err := s.RecordIncomingCall(number); err != nil {
-		writeErr(w, err)
+		reply(http.StatusBadRequest, "", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, ok())
+	reply(http.StatusOK, "call for "+number+" received — check the panel.", "")
 }

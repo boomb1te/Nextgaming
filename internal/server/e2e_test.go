@@ -1019,3 +1019,31 @@ func TestHDSnapshot(t *testing.T) {
 		t.Fatal("snapshot on an offline PC should fail")
 	}
 }
+
+func TestPhoneCallBrowserGet(t *testing.T) {
+	e := setup(t, 0)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+
+	get := func(q string) int {
+		req, _ := http.NewRequest("GET", e.base+"/api/phone/call?"+q, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// A plain browser GET with the key in the URL (no header) works.
+	if code := get("number=65121212&key=" + url.QueryEscape(e.s.cfg.ClubKey)); code != 200 {
+		t.Fatalf("GET with ?key= : status %d, want 200", code)
+	}
+	snap := e.snapshot()
+	if len(snap.PendingCalls) != 1 || snap.PendingCalls[0].Number != "+99365121212" {
+		t.Fatalf("pending after browser GET = %+v", snap.PendingCalls)
+	}
+	// Wrong key in the URL is refused.
+	if code := get("number=65121213&key=nope"); code != http.StatusForbidden {
+		t.Fatalf("GET wrong key: status %d, want 403", code)
+	}
+}

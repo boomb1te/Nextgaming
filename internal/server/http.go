@@ -419,6 +419,7 @@ func (s *Server) routes() http.Handler {
 
 	// Incoming calls (LAN only). The operator phone posts an answered call's
 	// number here (club key in X-NextGaming-Phone, not the admin cookie).
+	mux.HandleFunc("GET /api/phone/call", s.handlePhoneCall)
 	mux.HandleFunc("POST /api/phone/call", s.handlePhoneCall)
 	// Operator dismisses a pending-call prompt (booked it or declined).
 	h("POST /api/calls/{id}/dismiss", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
