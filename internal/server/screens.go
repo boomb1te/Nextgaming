@@ -258,6 +258,8 @@ func (s *Server) SetControl(pcID int64, active bool) error {
 			s.screens.setControl(0, s.now())
 			s.changed()
 		}
+		// Always tell the PC to release the player's input, best-effort.
+		s.hub.Send(pcID, protocol.TypeInput, protocol.InputBatch{Events: []protocol.InputEvent{{Kind: "unblock"}}})
 		return nil
 	}
 	if !s.hub.Online(pcID) {
@@ -271,6 +273,10 @@ func (s *Server) SetControl(pcID int64, active bool) error {
 	if first {
 		s.changed() // show the "being controlled" marker
 	}
+	// Block the player's physical mouse/keyboard while we control it. This is a
+	// refresh too: the helper auto-releases a few seconds after the last block,
+	// so a dropped panel or network never leaves the player's input dead.
+	s.hub.Send(pcID, protocol.TypeInput, protocol.InputBatch{Events: []protocol.InputEvent{{Kind: "block"}}})
 	return nil
 }
 

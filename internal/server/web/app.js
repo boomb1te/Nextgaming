@@ -69,6 +69,12 @@ function timeStr(t) { const d = new Date(t); return isNaN(d) || d.getFullYear() 
 function dateTimeStr(t) { const d = new Date(t); return isNaN(d) || d.getFullYear() < 2000 ? '—' : d.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }); }
 function isOwner() { return S.me && S.me.role === 'owner'; }
 function isTouchDevice() { try { return !!(window.matchMedia && matchMedia('(pointer: coarse)').matches); } catch (e) { return false; } }
+function fullscreenButton(target) {
+  return h('button', { class: 'btn small', onclick: () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else if (target.requestFullscreen) target.requestFullscreen().catch(() => {});
+  } }, '⛶ Full screen');
+}
 function pcById(id) { return S.snap && S.snap.pcs.find(p => p.id === id); }
 function zoneById(id) { return S.snap && S.snap.zones.find(z => z.id === id); }
 
@@ -919,7 +925,9 @@ function openScreenModal(id) {
   const waiting = h('div', { class: 'screen-wait' }, 'Waiting for image…');
   const snapBtn = h('button', { class: 'btn small', onclick: () => hdSnapshot(id, pc.name) }, '📷 HD snapshot');
   const bar = h('div', { class: 'screen-bigbar' }, snapBtn, controlControl(id, pc));
-  const body = h('div', null, bar, h('div', { class: 'screen-big-wrap' }, img, waiting));
+  const bigWrap = h('div', { class: 'screen-big-wrap' }, img, waiting);
+  bar.append(fullscreenButton(bigWrap));
+  const body = h('div', null, bar, bigWrap);
   const m = modal(pc.name + ' — live screen', body);
   // Seed from the thumbnail immediately, then refresh at full rate.
   refreshScreen(id, img, waiting, SCREEN_FOCUS_MS * 3);
@@ -996,7 +1004,8 @@ function controlModal(id, name) {
   const waiting = h('div', { class: 'screen-wait' }, 'Connecting…');
   const surface = h('div', { class: 'control-surface' }, img, waiting);
   const m = modal(name + ' — remote control', h('div', null,
-    h('div', { class: 'muted small', style: 'margin-bottom:6px' }, 'Your mouse drives this PC (about half a second behind). Close this window to release it.'),
+    h('div', { class: 'screen-bigbar' }, fullscreenButton(surface),
+      h('span', { class: 'muted small' }, 'Your mouse drives this PC (about half a second behind). The player’s mouse & keyboard are blocked while you control. Close to release.')),
     surface));
 
   let running = true;

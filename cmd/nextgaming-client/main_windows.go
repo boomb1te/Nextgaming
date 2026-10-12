@@ -115,7 +115,8 @@ func main() {
 	if *captureMode {
 		w.SetDPIAware()
 		a := &app{port: *port}
-		go a.inputLoop() // remote control: inject mouse/keyboard events
+		go a.inputLoop()       // remote control: inject mouse/keyboard events
+		go startInputBlocker() // remote control: block the player's input while controlled
 		a.captureLoop()
 		return
 	}

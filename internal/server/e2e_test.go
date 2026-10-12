@@ -1102,8 +1102,27 @@ func TestRemoteControlInput(t *testing.T) {
 	eventually(t, "the PC receives the input events", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(got) >= 3 && got[0].Kind == "move" && got[1].Kind == "down" && got[1].Button == "left"
+		var mouse []protocol.InputEvent // ignore control signals (block/unblock)
+		for _, e := range got {
+			if e.Kind == "move" || e.Kind == "down" || e.Kind == "up" || e.Kind == "wheel" {
+				mouse = append(mouse, e)
+			}
+		}
+		return len(mouse) >= 3 && mouse[0].Kind == "move" && mouse[1].Kind == "down" && mouse[1].Button == "left"
 	})
+
+	// Taking control also told the PC to block the player's physical input.
+	mu.Lock()
+	var blocked bool
+	for _, e := range got {
+		if e.Kind == "block" {
+			blocked = true
+		}
+	}
+	mu.Unlock()
+	if !blocked {
+		t.Fatal("expected a block signal when control started")
+	}
 
 	// Input is refused once control stops.
 	e.must("POST", fmt.Sprintf("/api/pcs/%d/control", pc.ID), map[string]any{"active": false}, nil)
