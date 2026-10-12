@@ -34,8 +34,8 @@ const (
 	// Remote control: a ~0.5s refresh is plenty (control is for fixing things,
 	// not gaming), at a clearly-readable resolution (above 720p) and quality.
 	controlEvery   = 500 * time.Millisecond
-	controlWidth   = 1600
-	controlQuality = 72
+	controlWidth   = 1920
+	controlQuality = 85
 	controlTTL     = 8 * time.Second // control stops this long after the last ping
 )
 

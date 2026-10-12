@@ -172,6 +172,12 @@ func setup(t *testing.T, nAgents int) *env {
 
 func TestEndToEnd(t *testing.T) {
 	e := setup(t, 3)
+	// Anchor the simulated clock to mid-morning so the ~2.5h of clock advances in
+	// this test never cross midnight (the daily report groups transactions by day,
+	// so a midnight crossing would split them and fail regardless of the code).
+	now := time.Now()
+	anchor := time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, now.Location())
+	e.offset.Store(int64(anchor.Sub(now)))
 
 	// --- setup & auth ---
 	if err := e.call("GET", "/api/state", nil, nil); err == nil {
@@ -1093,6 +1099,20 @@ func TestRemoteControlInput(t *testing.T) {
 
 	// Take control and send a click.
 	e.must("POST", fmt.Sprintf("/api/pcs/%d/control", pc.ID), map[string]any{"active": true}, nil)
+
+	// The panel marks the PC controlled, and the PC's own state shows the banner flag.
+	eventually(t, "controlled flag shows on panel and PC", func() bool {
+		cs := e.clientState(0)
+		snap := e.snapshot()
+		on := false
+		for i := range snap.PCs {
+			if snap.PCs[i].ID == pc.ID {
+				on = snap.PCs[i].Controlled
+			}
+		}
+		return cs.Controlled && on
+	})
+
 	e.must("POST", fmt.Sprintf("/api/pcs/%d/control/input", pc.ID), map[string]any{"events": []map[string]any{
 		{"kind": "move", "x": 0.5, "y": 0.5},
 		{"kind": "down", "button": "left", "x": 0.5, "y": 0.5},

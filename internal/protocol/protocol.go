@@ -397,6 +397,9 @@ type ClientState struct {
 	ClubName     string `json:"clubName"`
 	ServerOnline bool   `json:"serverOnline"`
 	WarnMinutes  []int  `json:"warnMinutes"`
+	// Controlled is true while an admin is remote-controlling this PC, so the
+	// lock screen shows a "staff is assisting" banner to the player.
+	Controlled bool `json:"controlled"`
 	// Message is the latest admin message; MessageID increases with each new one.
 	Message   string `json:"message"`
 	MessageID int64  `json:"messageId"`

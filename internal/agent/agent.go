@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nextgaming/internal/core"
@@ -159,6 +160,10 @@ type Agent struct {
 	inpMu    sync.Mutex
 	inpQueue []protocol.InputEvent
 	inpWake  chan struct{}
+	// ctrlUntil (unix nanos) is set by the "block" control signal and refreshed
+	// by each ping; while it is in the future the lock screen shows the
+	// "staff is assisting" banner. It lapses on its own if control drops.
+	ctrlUntil atomic.Int64
 
 	now func() time.Time
 }
@@ -585,6 +590,16 @@ func (a *Agent) enqueueInput(events []protocol.InputEvent) {
 	if len(events) == 0 {
 		return
 	}
+	// The block/unblock control signals also drive the on-PC "staff is assisting"
+	// banner, with the same auto-expiry as the input block.
+	for _, ev := range events {
+		switch ev.Kind {
+		case "block":
+			a.ctrlUntil.Store(time.Now().Add(6 * time.Second).UnixNano())
+		case "unblock":
+			a.ctrlUntil.Store(0)
+		}
+	}
 	a.inpMu.Lock()
 	a.inpQueue = append(a.inpQueue, events...)
 	// Bound the queue so a stuck helper can't make us grow without limit.
@@ -690,6 +705,9 @@ func (a *Agent) ClientState() protocol.ClientState {
 		Locked: a.st.Locked, Paused: a.st.Paused, Mode: a.st.Mode, SessionID: a.st.SessionID,
 		PCName: a.st.PCName, ClubName: a.st.ClubName, ServerOnline: a.online,
 		WarnMinutes: a.st.WarnMinutes, Message: a.message, MessageID: a.messageID,
+	}
+	if u := a.ctrlUntil.Load(); u != 0 && time.Now().UnixNano() < u {
+		cs.Controlled = true
 	}
 	if cs.PCName == "" {
 		cs.PCName = a.inv.Hostname

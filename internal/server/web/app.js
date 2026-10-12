@@ -388,6 +388,7 @@ function renderPCs() {
       tileTimer(pc),
       h('div', { class: 'sub' }, tileSub(pc)),
       pc.nextBooking ? h('div', { class: 'booked' }, `📅 Booked ${timeStr(pc.nextBooking.at)} — ${pc.nextBooking.who}`) : null,
+      pc.controlled ? h('div', { class: 'controlled' }, '🖱 Being controlled') : null,
       pc.runtime.online && !pc.runtime.clientAlive ? h('div', { class: 'warn' }, 'Lock screen not running') : null,
       !pc.runtime.online && pc.session ? h('div', { class: 'warn' }, 'Offline during session') : null);
   }));

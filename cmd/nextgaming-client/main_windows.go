@@ -80,6 +80,7 @@ type app struct {
 	lastForce    time.Time
 	lockMessage  string
 	lockMsgUntil time.Time
+	controlShown bool // the "staff is controlling" banner is currently shown
 
 	// staff login on the lock screen
 	loginMode  bool
@@ -314,6 +315,18 @@ func (a *app) update() {
 				w.MessageBeep(w.MB_ICONWARNING)
 			}
 		}
+	}
+
+	// Remote-control banner: show a persistent notice while an admin controls
+	// this PC. It auto-clears when control ends (the agent's flag lapses).
+	if ok && st.Controlled {
+		if !a.controlShown {
+			a.controlShown = true
+			a.showToast("A staff member is assisting with this computer.", false, time.Hour)
+		}
+	} else if a.controlShown {
+		a.controlShown = false
+		w.ShowWindow(a.toastWnd, w.SW_HIDE)
 	}
 
 	if locked {

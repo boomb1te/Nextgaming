@@ -46,6 +46,8 @@ type PCView struct {
 	State string `json:"state"`
 	// NextBooking marks an upcoming reservation on a free PC ("Booked 19:00 — Merdan").
 	NextBooking *BookingMark `json:"nextBooking,omitempty"`
+	// Controlled is true while an admin is remote-controlling this PC.
+	Controlled bool `json:"controlled,omitempty"`
 }
 
 // Snapshot is everything the admin panel needs, pushed on every change.
@@ -96,6 +98,7 @@ func (s *Server) BuildSnapshot() (*Snapshot, error) {
 		byPC[open[i].PCID] = &open[i]
 	}
 	marks := s.nextBookingMarks(now)
+	controlled := s.screens.controlledPC(now)
 	snap := &Snapshot{ServerTime: now, Version: Version, Settings: settings, Zones: zones, Packages: pkgs,
 		Shift: shift, Alerts: s.recentAlerts(30), PCs: make([]PCView, 0, len(pcs))}
 	for _, pc := range pcs {
@@ -124,6 +127,7 @@ func (s *Server) BuildSnapshot() (*Snapshot, error) {
 			v.Session = sv
 		}
 		v.State = tileState(v)
+		v.Controlled = pc.ID == controlled
 		if v.Session == nil {
 			v.NextBooking = marks[pc.ID] // only show a reservation marker on a free PC
 		}
