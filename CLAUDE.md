@@ -2,6 +2,8 @@
 
 Gaming-club management system (PanCafe replacement). Go 1.24, no CGO, dependencies vendored.
 Read README.md for the product view. This file is the engineering contract.
+For product context, current version/feature status, and the roadmap, read
+`docs/PROJECT_CONTEXT.md` first.
 
 ## Commands
 
