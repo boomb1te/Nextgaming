@@ -34,7 +34,18 @@ type handler func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, er
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(webFS, "web")
-	mux.Handle("GET /", http.FileServer(http.FS(static)))
+	fileSrv := http.FileServer(http.FS(static))
+	// Fonts never change, so cache them hard; the HTML/CSS/JS must revalidate on
+	// every load, otherwise a panel update wouldn't show until a manual hard
+	// refresh (embedded files carry no modtime, so browsers cache them forever).
+	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".woff2") || strings.HasSuffix(r.URL.Path, ".woff") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		fileSrv.ServeHTTP(w, r)
+	}))
 
 	// public
 	mux.HandleFunc("GET /api/setup", s.jsonPublic(func(r *http.Request) (any, error) {
@@ -97,6 +108,15 @@ func (s *Server) routes() http.Handler {
 			return nil, err
 		}
 		return s.StartSession(a.ID, pathID(r), req)
+	})
+	h("POST /api/pcs/{id}/session/client", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		var req struct {
+			ClientID int64 `json:"clientId"`
+		}
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return ok(), s.SetSessionClient(a.ID, pathID(r), req.ClientID)
 	})
 	h("POST /api/pcs/{id}/add-time", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		var req TimeRequest
@@ -246,6 +266,28 @@ func (s *Server) routes() http.Handler {
 		}
 		return ok(), s.SaveSettings(a.ID, st)
 	})
+	// Appearance images (desktop wallpaper + lock-screen background) pushed to the
+	// gaming PCs. Upload raw image bytes; GET returns the current image for a preview.
+	owner("GET /api/settings/appearance/{kind}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		data := s.loadAsset(r.PathValue("kind"))
+		if data == nil {
+			return nil, errNotFound("image")
+		}
+		w.Header().Set("Content-Type", http.DetectContentType(data))
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Write(data)
+		return nil, errHandled
+	})
+	owner("PUT /api/settings/appearance/{kind}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxAssetBytes+4096))
+		if err != nil {
+			return nil, errBad("upload failed or the image is too large")
+		}
+		return ok(), s.SaveAppearance(a.ID, r.PathValue("kind"), body)
+	})
+	owner("DELETE /api/settings/appearance/{kind}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return ok(), s.SaveAppearance(a.ID, r.PathValue("kind"), nil)
+	})
 	owner("GET /api/club-key", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		return map[string]any{
 			"clubKey":   s.cfg.ClubKey,
@@ -322,6 +364,18 @@ func (s *Server) routes() http.Handler {
 	h("DELETE /api/clients/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		return ok(), s.DeleteClient(a.ID, pathID(r))
 	})
+	// Membership: authorize a client (returns the one-time password), reset it, or remove it.
+	h("POST /api/clients/{id}/authorize", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		pw, err := s.AuthorizeClient(a.ID, pathID(r))
+		return map[string]string{"password": pw}, err
+	})
+	h("POST /api/clients/{id}/reset-password", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		pw, err := s.ResetMemberPassword(a.ID, pathID(r))
+		return map[string]string{"password": pw}, err
+	})
+	h("POST /api/clients/{id}/deauthorize", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return ok(), s.DeauthorizeClient(a.ID, pathID(r))
+	})
 	h("GET /api/groups", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		return s.ListGroups()
 	})
@@ -394,6 +448,9 @@ func (s *Server) routes() http.Handler {
 	})
 	h("POST /api/bookings/{id}/noshow", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
 		return ok(), s.ReleaseNoShow(a.ID, pathID(r))
+	})
+	h("DELETE /api/bookings/{id}", func(w http.ResponseWriter, r *http.Request, a core.Admin) (any, error) {
+		return ok(), s.DeleteBooking(a.ID, pathID(r))
 	})
 
 	// File sharing (LAN only). Browse the front-desk PC's own filesystem, list a

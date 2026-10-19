@@ -74,6 +74,7 @@ type app struct {
 	scale        float64
 	toastText    string
 	toastWarn    bool
+	toastSmall   bool // small, top-left-corner toast (used for time warnings)
 	lastMsgID    int64
 	msgSeen      bool
 	warned       map[string]bool
@@ -81,6 +82,12 @@ type app struct {
 	lockMessage  string
 	lockMsgUntil time.Time
 	controlShown bool // the "staff is controlling" banner is currently shown
+
+	// lock-screen background image (dimmed BGRA, top-down) + the version loaded.
+	bgPix []byte
+	bgW   int32
+	bgH   int32
+	bgVer int
 
 	// staff login on the lock screen
 	loginMode  bool
@@ -108,7 +115,15 @@ func main() {
 	runtime.LockOSThread()
 	port := flag.Int("port", protocol.DefaultClientPort, "agent local port")
 	captureMode := flag.Bool("capture", false, "run only as the screen-capture helper (started by the agent as the logged-in user)")
+	setWallpaper := flag.String("set-wallpaper", "\x00", "set the desktop wallpaper to this image and exit (empty = restore default)")
 	flag.Parse()
+
+	// One-shot wallpaper setter: the agent runs this as the logged-in user so the
+	// wallpaper applies to that user's desktop. \x00 means the flag was not given.
+	if *setWallpaper != "\x00" {
+		applyWallpaper(*setWallpaper)
+		return
+	}
 
 	// Capture-only helper: no window, no keyboard hook, no single-instance lock.
 	// It runs as the logged-in user (GDI capture from a SYSTEM process is black),
@@ -282,6 +297,9 @@ func (a *app) update() {
 	a.mu.Unlock()
 	a.st = st
 	a.agentDown = !ok
+	if ok && st.LockScreenVer != a.bgVer {
+		a.ensureLockBg(st.LockScreenVer)
+	}
 	locked := !ok || st.Locked
 	if locked != a.locked {
 		a.applyLock(locked)
@@ -311,7 +329,7 @@ func (a *app) update() {
 				if m == 1 {
 					unit = "minute"
 				}
-				a.showToast(fmt.Sprintf("%d %s left in your session.\nSee the administrator to add time.", m, unit), true, 10*time.Second)
+				a.showToastAt(fmt.Sprintf("%d %s left — see the front desk to add time.", m, unit), true, true, 10*time.Second)
 				w.MessageBeep(w.MB_ICONWARNING)
 			}
 		}
@@ -498,13 +516,26 @@ func (a *app) doLogin() {
 	}()
 }
 
-func (a *app) showToast(text string, warn bool, d time.Duration) {
-	a.toastText, a.toastWarn = text, warn
-	width := a.px(520)
-	textH := w.MeasureText(text, width-a.px(40), w.Font(a.px(20), w.FW_SEMIBOLD))
-	height := textH + a.px(40)
-	sw := w.GetSystemMetrics(w.SM_CXSCREEN)
-	w.MoveWindow(a.toastWnd, (sw-width)/2, a.px(40), width, height)
+func (a *app) showToast(text string, warn bool, d time.Duration) { a.showToastAt(text, warn, false, d) }
+
+// showToastAt shows a toast. small=true makes a compact box tucked into the
+// top-left corner (for time warnings), out of the way of the game; otherwise a
+// wide banner is centred at the top (admin messages and notices).
+func (a *app) showToastAt(text string, warn, small bool, d time.Duration) {
+	a.toastText, a.toastWarn, a.toastSmall = text, warn, small
+	var x, y, width, height int32
+	if small {
+		width = a.px(300)
+		textH := w.MeasureText(text, width-a.px(24), w.Font(a.px(14), w.FW_SEMIBOLD))
+		height = textH + a.px(22)
+		x, y = a.px(16), a.px(16)
+	} else {
+		width = a.px(520)
+		textH := w.MeasureText(text, width-a.px(40), w.Font(a.px(20), w.FW_SEMIBOLD))
+		height = textH + a.px(40)
+		x, y = (w.GetSystemMetrics(w.SM_CXSCREEN)-width)/2, a.px(40)
+	}
+	w.MoveWindow(a.toastWnd, x, y, width, height)
 	w.ShowWindow(a.toastWnd, w.SW_SHOWNOACTIVATE)
 	w.SetWindowPos(a.toastWnd, w.HWND_TOPMOST, 0, 0, 0, 0, w.SWP_NOMOVE|w.SWP_NOSIZE|w.SWP_NOACTIVATE)
 	w.InvalidateRect(a.toastWnd)
@@ -687,6 +718,15 @@ func (a *app) paintLock(hwnd uintptr) {
 	defer p.End()
 	p.Fill(w.RECT{Right: p.W, Bottom: p.H}, colBg)
 
+	// Custom background image (already dimmed for text readability), stretched
+	// over the whole virtual desktop.
+	a.mu.Lock()
+	bg, bw, bh := a.bgPix, a.bgW, a.bgH
+	a.mu.Unlock()
+	if len(bg) > 0 {
+		p.DrawImageBGRA(bg, bw, bh, w.RECT{Right: p.W, Bottom: p.H})
+	}
+
 	// Centre on the primary monitor, which starts at (0,0) in screen space.
 	ox := -w.GetSystemMetrics(w.SM_XVIRTUALSCREEN)
 	oy := -w.GetSystemMetrics(w.SM_YVIRTUALSCREEN)
@@ -695,6 +735,12 @@ func (a *app) paintLock(hwnd uintptr) {
 		r := w.RECT{Left: ox + sw/20, Top: oy + int32(float64(sh)*frac), Right: ox + sw - sw/20, Bottom: oy + int32(float64(sh)*frac) + height*2}
 		p.Text(text, r, w.Font(height, weight), color, w.DT_CENTER|w.DT_SINGLELINE|w.DT_END_ELLIPSIS)
 		_ = y
+	}
+	// leftLine draws left-aligned text at an absolute top offset (for the
+	// top-left name position).
+	leftLine := func(text string, top, height int32, weight int32, color uintptr) {
+		r := w.RECT{Left: ox + sw/28, Top: oy + top, Right: ox + sw - sw/20, Bottom: oy + top + height*2}
+		p.Text(text, r, w.Font(height, weight), color, w.DT_LEFT|w.DT_SINGLELINE|w.DT_END_ELLIPSIS)
 	}
 
 	club := a.st.ClubName
@@ -713,8 +759,13 @@ func (a *app) paintLock(hwnd uintptr) {
 		status, statusCol = "Session paused — please see the administrator", colWarn
 	}
 
-	line(club, 0, sh/24, w.FW_SEMIBOLD, colMuted, 0.24)
-	line(name, 0, sh/7, w.FW_BOLD, colText, 0.33)
+	if a.st.NamePosition == "top-left" {
+		leftLine(club, sh/22, sh/36, w.FW_SEMIBOLD, colMuted)
+		leftLine(name, sh/22+sh/26, sh/13, w.FW_BOLD, colText)
+	} else {
+		line(club, 0, sh/24, w.FW_SEMIBOLD, colMuted, 0.24)
+		line(name, 0, sh/7, w.FW_BOLD, colText, 0.33)
+	}
 	line(status, 0, sh/30, w.FW_NORMAL, statusCol, 0.56)
 	line(time.Now().Format("15:04"), 0, sh/22, w.FW_SEMIBOLD, colMuted, 0.64)
 
@@ -820,7 +871,14 @@ func (a *app) paintToast(hwnd uintptr) {
 	}
 	p.Fill(w.RECT{Right: p.W, Bottom: p.H}, bg)
 	pad := a.px(20)
-	p.Text(a.toastText, w.RECT{Left: pad, Top: pad, Right: p.W - pad, Bottom: p.H - pad/2}, w.Font(a.px(20), w.FW_SEMIBOLD), colText, w.DT_CENTER|w.DT_WORDBREAK)
+	font := w.Font(a.px(20), w.FW_SEMIBOLD)
+	align := uint32(w.DT_CENTER | w.DT_WORDBREAK)
+	if a.toastSmall {
+		pad = a.px(12)
+		font = w.Font(a.px(14), w.FW_SEMIBOLD)
+		align = w.DT_LEFT | w.DT_WORDBREAK
+	}
+	p.Text(a.toastText, w.RECT{Left: pad, Top: pad, Right: p.W - pad, Bottom: p.H - pad/2}, font, colText, align)
 }
 
 func fmtDur(sec int64) string {

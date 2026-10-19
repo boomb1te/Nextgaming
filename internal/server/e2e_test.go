@@ -708,6 +708,124 @@ func TestClientsAndGroups(t *testing.T) {
 	}
 }
 
+func TestAuthorizedMembers(t *testing.T) {
+	e := setup(t, 0)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+
+	var c struct{ ID int64 }
+	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "65000010"}, &c)
+
+	clientByID := func(id int64) ClientView {
+		var list []ClientView
+		e.must("GET", "/api/clients", nil, &list)
+		for _, v := range list {
+			if v.ID == id {
+				return v
+			}
+		}
+		t.Fatalf("client %d not in list", id)
+		return ClientView{}
+	}
+
+	if clientByID(c.ID).Authorized {
+		t.Fatal("new client should be a basic (non-authorized) client")
+	}
+
+	// Authorize: returns a one-time password; only the hash is stored.
+	var auth struct{ Password string }
+	e.must("POST", fmt.Sprintf("/api/clients/%d/authorize", c.ID), nil, &auth)
+	if len(auth.Password) != 8 {
+		t.Fatalf("authorize password = %q, want 8 chars", auth.Password)
+	}
+	v := clientByID(c.ID)
+	if !v.Authorized || v.RegisteredAt == nil {
+		t.Fatal("client should now be an authorized member with a registration time")
+	}
+	_, hash, found, err := store.AccountByClientID(e.s.st.DB, c.ID)
+	if err != nil || !found {
+		t.Fatalf("account row missing: found=%v err=%v", found, err)
+	}
+	if !core.VerifyPassword(hash, auth.Password) {
+		t.Fatal("stored hash must verify the issued password")
+	}
+	if strings.Contains(hash, auth.Password) {
+		t.Fatal("stored hash must not contain the plaintext password")
+	}
+
+	// Double authorize is rejected.
+	if err := e.call("POST", fmt.Sprintf("/api/clients/%d/authorize", c.ID), nil, nil); err == nil {
+		t.Fatal("authorizing an existing member should fail")
+	}
+
+	// Reset issues a new password; the old one stops working.
+	var reset struct{ Password string }
+	e.must("POST", fmt.Sprintf("/api/clients/%d/reset-password", c.ID), nil, &reset)
+	if reset.Password == auth.Password {
+		t.Fatal("reset should produce a different password")
+	}
+	_, hash2, _, _ := store.AccountByClientID(e.s.st.DB, c.ID)
+	if core.VerifyPassword(hash2, auth.Password) || !core.VerifyPassword(hash2, reset.Password) {
+		t.Fatal("after reset only the new password should verify")
+	}
+
+	// De-authorize removes membership; reset then fails.
+	e.must("POST", fmt.Sprintf("/api/clients/%d/deauthorize", c.ID), nil, nil)
+	if clientByID(c.ID).Authorized {
+		t.Fatal("client should be basic again after de-authorization")
+	}
+	if err := e.call("POST", fmt.Sprintf("/api/clients/%d/reset-password", c.ID), nil, nil); err == nil {
+		t.Fatal("resetting a non-member should fail")
+	}
+}
+
+func TestSessionClientHours(t *testing.T) {
+	e := setup(t, 1)
+	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)
+	// The default zone already has an hourly rate; open sessions need a shift.
+	e.must("POST", "/api/shift/open", map[string]any{"openingCash": 5000}, nil)
+	pc := e.pc("PC 1")
+
+	var c struct{ ID int64 }
+	e.must("POST", "/api/clients", map[string]string{"name": "Merdan", "phone": "65000011"}, &c)
+
+	// Start an open session credited to the client, play 40 min, end it.
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/start", pc.ID), StartRequest{Mode: core.ModeOpen, ClientID: c.ID}, nil)
+	if got := e.pc("PC 1").Session; got == nil || got.ClientID != c.ID {
+		t.Fatalf("session should be credited to client %d, got %+v", c.ID, got)
+	}
+	e.advance(40 * time.Minute)
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/end", pc.ID), EndRequest{}, nil)
+
+	hoursOf := func(id int64) int64 {
+		var list []ClientView
+		e.must("GET", "/api/clients", nil, &list)
+		for _, v := range list {
+			if v.ID == id {
+				return v.HoursSeconds
+			}
+		}
+		return -1
+	}
+	if h := hoursOf(c.ID); h < 39*60 || h > 41*60 {
+		t.Fatalf("hours played = %ds, want ~2400s (40 min)", h)
+	}
+
+	// A second session, this time attached to the running session after start.
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/start", pc.ID), StartRequest{Mode: core.ModeOpen}, nil)
+	if got := e.pc("PC 1").Session; got == nil || got.ClientID != 0 {
+		t.Fatal("second session should start with no client attached")
+	}
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/session/client", pc.ID), map[string]int64{"clientId": c.ID}, nil)
+	if got := e.pc("PC 1").Session; got == nil || got.ClientID != c.ID {
+		t.Fatal("attaching a client to the running session failed")
+	}
+	e.advance(20 * time.Minute)
+	e.must("POST", fmt.Sprintf("/api/pcs/%d/end", pc.ID), EndRequest{}, nil)
+	if h := hoursOf(c.ID); h < 59*60 || h > 61*60 {
+		t.Fatalf("hours played across two sessions = %ds, want ~3600s (60 min)", h)
+	}
+}
+
 func TestBookings(t *testing.T) {
 	e := setup(t, 1)
 	e.must("POST", "/api/setup", map[string]string{"username": "owner", "password": "secret1"}, nil)

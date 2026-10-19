@@ -8,16 +8,17 @@ import (
 	"nextgaming/internal/protocol"
 )
 
-// Screen monitoring. While an admin has the Screens tab open, the server
-// broadcasts a capture tick to every online PC every screenThumbEvery, so all
-// PCs grab a frame at the same moment. The PC the admin has opened full-size
-// (the focus) gets a larger, faster frame on its own cadence. Nothing is
-// captured when nobody is watching, so idle clubs pay no cost.
+// Screen monitoring runs at a flat 1 fps: whether watching the whole grid or a
+// single PC expanded full-size, no PC is captured more than once a second while
+// nobody controls it. The only faster tier is remote control (controlEvery
+// below), so the smooth sub-second refresh costs the gaming PC nothing unless an
+// admin has actually taken control. Nothing is captured when no one is watching,
+// so idle clubs pay nothing.
 const (
-	screenThumbEvery = 2500 * time.Millisecond
-	screenFocusEvery = 1000 * time.Millisecond
-	screenWatchTTL   = 8 * time.Second  // monitoring stops this long after the last sign of a viewer
-	screenStale      = 30 * time.Second // a frame older than this is not served
+	screenThumbEvery = 1000 * time.Millisecond // grid: 1 fps (tiny low-quality thumbnails)
+	screenFocusEvery = 1000 * time.Millisecond // one PC expanded for watching: 1 fps
+	screenWatchTTL   = 8 * time.Second          // monitoring stops this long after the last sign of a viewer
+	screenStale      = 30 * time.Second         // a frame older than this is not served
 
 	thumbWidth    = 384
 	thumbQuality  = 40
@@ -31,9 +32,11 @@ const (
 	snapQuality = 90
 	snapStale   = 2 * time.Minute // a snapshot older than this is not served
 
-	// Remote control: a ~0.5s refresh is plenty (control is for fixing things,
-	// not gaming), at a clearly-readable resolution (above 720p) and quality.
-	controlEvery   = 500 * time.Millisecond
+	// Remote control: 4 fps for a smooth-enough cursor, at a clearly-readable
+	// resolution (above 720p) and quality. This sub-second rate is control-only
+	// — it affects just the one PC being controlled, and only while controlled —
+	// so monitoring (1 fps across every PC) never pays for it.
+	controlEvery   = 250 * time.Millisecond
 	controlWidth   = 1920
 	controlQuality = 85
 	controlTTL     = 8 * time.Second // control stops this long after the last ping

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"nextgaming/internal/core"
 	"nextgaming/internal/store"
@@ -11,9 +12,137 @@ import (
 
 // ---- clients ----
 
-// ListClients returns clients, optionally filtered by a name/phone search.
-func (s *Server) ListClients(search string) ([]core.Client, error) {
-	return store.ListClients(s.st.DB, search)
+// ClientView is a client plus its membership status and played hours, as the
+// panel's Clients tab shows it. A client with an account row is an authorized
+// member (has a login password); without one it is a basic booking contact.
+type ClientView struct {
+	core.Client
+	Authorized   bool       `json:"authorized"`
+	Status       string     `json:"status,omitempty"`
+	RegisteredAt *time.Time `json:"registeredAt,omitempty"`
+	HoursSeconds int64      `json:"hoursSeconds"`
+}
+
+// ListClients returns clients (optionally filtered by a name/phone search),
+// each enriched with membership and total played hours.
+func (s *Server) ListClients(search string) ([]ClientView, error) {
+	clients, err := store.ListClients(s.st.DB, search)
+	if err != nil {
+		return nil, err
+	}
+	accts, err := store.AllAccounts(s.st.DB)
+	if err != nil {
+		return nil, err
+	}
+	hours, err := store.ClientHoursSeconds(s.st.DB, s.now())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ClientView, 0, len(clients))
+	for _, c := range clients {
+		v := ClientView{Client: c, HoursSeconds: hours[c.ID]}
+		if a, ok := accts[c.ID]; ok {
+			reg := a.RegisteredAt
+			v.Authorized, v.Status, v.RegisteredAt = true, a.Status, &reg
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// AuthorizeClient turns a basic client into a member: it generates a one-time
+// password, stores only its hash, and returns the plain password ONCE for the
+// operator to pass on (later this will be sent by SMS). Fails if the client has
+// no usable phone or is already a member.
+func (s *Server) AuthorizeClient(adminID, clientID int64) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var plain string
+	err := s.st.Tx(func(q store.Q) error {
+		c, err := store.ClientByID(q, clientID)
+		if err != nil {
+			return errNotFound("client")
+		}
+		if core.PhoneKey(c.Phone) == "" {
+			return errBad("this client needs a valid Turkmen phone number before becoming a member")
+		}
+		if _, _, found, err := store.AccountByClientID(q, clientID); err != nil {
+			return err
+		} else if found {
+			return errConflict("%s is already a member — use Reset password", c.Name)
+		}
+		if plain, err = core.GenerateMemberPassword(); err != nil {
+			return err
+		}
+		hash, err := core.HashPassword(plain)
+		if err != nil {
+			return err
+		}
+		if err := store.CreateAccount(q, clientID, hash, adminID, s.now()); err != nil {
+			return err
+		}
+		return store.Audit(q, adminID, "client_authorize", 0, fmt.Sprintf("%d %s", clientID, c.Name))
+	})
+	if err != nil {
+		return "", err
+	}
+	return plain, nil
+}
+
+// ResetMemberPassword regenerates a member's one-time password and returns the
+// new plain value once. Fails if the client is not a member.
+func (s *Server) ResetMemberPassword(adminID, clientID int64) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var plain string
+	err := s.st.Tx(func(q store.Q) error {
+		c, err := store.ClientByID(q, clientID)
+		if err != nil {
+			return errNotFound("client")
+		}
+		if _, _, found, err := store.AccountByClientID(q, clientID); err != nil {
+			return err
+		} else if !found {
+			return errConflict("%s is not a member yet — use Authorize", c.Name)
+		}
+		if plain, err = core.GenerateMemberPassword(); err != nil {
+			return err
+		}
+		hash, err := core.HashPassword(plain)
+		if err != nil {
+			return err
+		}
+		if err := store.SetAccountPassword(q, clientID, hash); err != nil {
+			return err
+		}
+		return store.Audit(q, adminID, "client_password_reset", 0, fmt.Sprintf("%d %s", clientID, c.Name))
+	})
+	if err != nil {
+		return "", err
+	}
+	return plain, nil
+}
+
+// DeauthorizeClient removes a client's membership (the client record stays, and
+// any past sessions keep crediting their hours).
+func (s *Server) DeauthorizeClient(adminID, clientID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.st.Tx(func(q store.Q) error {
+		c, err := store.ClientByID(q, clientID)
+		if err != nil {
+			return errNotFound("client")
+		}
+		if _, _, found, err := store.AccountByClientID(q, clientID); err != nil {
+			return err
+		} else if !found {
+			return errConflict("%s is not a member", c.Name)
+		}
+		if err := store.DeleteAccount(q, clientID); err != nil {
+			return err
+		}
+		return store.Audit(q, adminID, "client_deauthorize", 0, fmt.Sprintf("%d %s", clientID, c.Name))
+	})
 }
 
 // CreateClient adds a client. Name is required; phone must be a valid Turkmen

@@ -197,6 +197,14 @@ type Settings struct {
 	AutoFixWoL bool `json:"autoFixWol"`
 	// RequireShift: paid sessions can only start while a shift is open.
 	RequireShift bool `json:"requireShift"`
+	// Appearance pushed to the gaming PCs. The images themselves are stored as
+	// files on the server; these counters bump on each upload so agents know to
+	// re-fetch. 0 means "no image set" (use the plain default).
+	DesktopWallpaperVer int `json:"desktopWallpaperVer"`
+	LockScreenVer       int `json:"lockScreenVer"`
+	// NamePosition places the PC name on the lock screen: "center" (default) or
+	// "top-left".
+	NamePosition string `json:"namePosition"`
 }
 
 // DefaultSettings are used on first run.
@@ -209,5 +217,6 @@ func DefaultSettings() Settings {
 		WarnMinutes:      []int{5, 1},
 		AutoFixWoL:       true,
 		RequireShift:     true,
+		NamePosition:     "center",
 	}
 }

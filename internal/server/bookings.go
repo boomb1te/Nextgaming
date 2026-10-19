@@ -213,6 +213,30 @@ func (s *Server) ReleaseNoShow(adminID, id int64) error {
 	return s.closeBooking(adminID, id, core.BookingNoShow, "booking_noshow")
 }
 
+// DeleteBooking removes a booking from the schedule entirely. It does not touch
+// money: any session the booking started keeps running, just without the link.
+func (s *Server) DeleteBooking(adminID, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var who string
+	err := s.st.Tx(func(q store.Q) error {
+		b, err := store.BookingByID(q, id)
+		if err != nil {
+			return errNotFound("booking")
+		}
+		_, who, _, _ = s.bookingWho(q, b)
+		if err := store.DeleteBooking(q, id); err != nil {
+			return err
+		}
+		return store.Audit(q, adminID, "booking_delete", 0, fmt.Sprintf("booking %d (%s)", id, who))
+	})
+	if err != nil {
+		return err
+	}
+	s.changed()
+	return nil
+}
+
 func (s *Server) closeBooking(adminID, id int64, status core.BookingStatus, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -301,6 +325,13 @@ func (s *Server) autoStartLocked(b core.Booking, now time.Time) {
 	var started, failed []string
 	err := s.st.Tx(func(q store.Q) error {
 		_, who, _, _ := s.bookingWho(q, b)
+		// A single-client booking credits that client's hours on every PC it
+		// starts. A group booking can't be auto-split per person, so its sessions
+		// start unattached (the operator can attach a person per PC if wanted).
+		var attachClient int64
+		if b.GroupID == 0 && b.ClientID > 0 {
+			attachClient = b.ClientID
+		}
 		for _, pcID := range b.PCIDs {
 			pc, err := store.PCByID(q, pcID)
 			if err != nil {
@@ -315,7 +346,7 @@ func (s *Server) autoStartLocked(b core.Booking, now time.Time) {
 				failed = append(failed, pc.Name+" (still in use)")
 				continue
 			}
-			if err := s.startBookingPC(q, pc, who, b.ID, now); err != nil {
+			if err := s.startBookingPC(q, pc, who, b.ID, attachClient, now); err != nil {
 				failed = append(failed, pc.Name+" ("+err.Error()+")")
 				continue
 			}
@@ -342,7 +373,7 @@ func (s *Server) autoStartLocked(b core.Booking, now time.Time) {
 
 // startBookingPC starts an open session for a booking. Open never auto-locks,
 // and no money moves at start, so it does not require an open shift.
-func (s *Server) startBookingPC(q store.Q, pc core.PC, who string, bookingID int64, now time.Time) error {
+func (s *Server) startBookingPC(q store.Q, pc core.PC, who string, bookingID, clientID int64, now time.Time) error {
 	rate := s.zoneRate(q, pc)
 	if rate <= 0 {
 		return fmt.Errorf("no hourly rate in its zone")
@@ -351,6 +382,10 @@ func (s *Server) startBookingPC(q store.Q, pc core.PC, who string, bookingID int
 	note := who
 	sess := &core.Session{PCID: pc.ID, Mode: core.ModeOpen, Status: core.StatusActive, StartedAt: now,
 		RatePerHour: rate, StartedBy: 0, ShiftID: shiftID, TariffName: "Open (booking)", Note: note}
+	if clientID > 0 {
+		cid := clientID
+		sess.CustomerID = &cid
+	}
 	if err := store.InsertSession(q, sess); err != nil {
 		return err
 	}

@@ -76,6 +76,10 @@ var (
 	pCreateCompatibleBitmap = gdi32.NewProc("CreateCompatibleBitmap")
 	pBitBlt                 = gdi32.NewProc("BitBlt")
 	pDeleteDC               = gdi32.NewProc("DeleteDC")
+	pStretchDIBits          = gdi32.NewProc("StretchDIBits")
+	pSetStretchBltMode      = gdi32.NewProc("SetStretchBltMode")
+
+	pSystemParametersInfoW = user32.NewProc("SystemParametersInfoW")
 
 	pGetModuleHandleW   = kernel32.NewProc("GetModuleHandleW")
 	pGetCurrentThreadId = kernel32.NewProc("GetCurrentThreadId")

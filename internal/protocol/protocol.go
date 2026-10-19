@@ -53,7 +53,21 @@ const (
 	TypeFSList    = "fs_list"   // list the PC's shared folder (reply carries the listing in the Ack)
 	TypeFSPush    = "fs_push"   // download a file from the server into the shared folder
 	TypeFSPull    = "fs_pull"   // upload a file from the shared folder to the server
+	TypeAsset     = "asset"     // server -> agent: an appearance image (wallpaper / lock bg)
 )
+
+// Asset kinds pushed to the agent.
+const (
+	AssetDesktop   = "desktop"   // the Windows desktop wallpaper on the gaming PC
+	AssetLockBg    = "lock_bg"   // the lock-screen background image
+)
+
+// Asset carries one appearance image to the agent. Empty Data clears the image.
+type Asset struct {
+	Kind    string `json:"kind"`
+	Version int    `json:"version"`
+	Data    []byte `json:"data,omitempty"` // raw image bytes (jpeg/png); empty = clear
+}
 
 // RejectRemoved is the Reject reason for a PC that was removed in the admin panel.
 const RejectRemoved = "removed"
@@ -88,6 +102,10 @@ type Hello struct {
 	// InstalledAt is when the agent was (re)installed. A PC removed in the
 	// admin panel comes back only if its agent was installed after the removal.
 	InstalledAt time.Time `json:"installedAt"`
+	// Appearance image versions the agent already has, so the server only
+	// re-sends an image when it changed.
+	DesktopWallpaperVer int `json:"desktopWallpaperVer"`
+	LockScreenVer       int `json:"lockScreenVer"`
 }
 
 // Welcome answers a valid Hello.
@@ -125,6 +143,11 @@ type DesiredState struct {
 	Currency         string `json:"currency,omitempty"`
 	GraceSeconds     int    `json:"graceSeconds,omitempty"`
 	MinChargeMinutes int    `json:"minChargeMinutes,omitempty"`
+	// Appearance: image versions (so the agent re-fetches on change) and where to
+	// put the PC name on the lock screen ("center" | "top-left").
+	DesktopWallpaperVer int    `json:"desktopWallpaperVer,omitempty"`
+	LockScreenVer       int    `json:"lockScreenVer,omitempty"`
+	NamePosition        string `json:"namePosition,omitempty"`
 }
 
 // Heartbeat is sent by the agent every few seconds.
@@ -409,4 +432,9 @@ type ClientState struct {
 	RatePerHour int64  `json:"ratePerHour"`
 	Cost        int64  `json:"cost"`
 	Currency    string `json:"currency"`
+	// Appearance for the lock screen: where to draw the PC name, and a counter
+	// that bumps when the background image changes (the client re-fetches the
+	// bytes from the agent's /lock-bg endpoint when it does).
+	NamePosition  string `json:"namePosition"`
+	LockScreenVer int    `json:"lockScreenVer"`
 }

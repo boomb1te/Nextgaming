@@ -482,7 +482,8 @@ func (s *Server) desiredState(pcID int64) (protocol.DesiredState, error) {
 		return protocol.DesiredState{}, err
 	}
 	settings := s.Settings()
-	ds := protocol.DesiredState{Locked: true, PCName: pc.Name, ClubName: settings.ClubName, WarnMinutes: settings.WarnMinutes}
+	ds := protocol.DesiredState{Locked: true, PCName: pc.Name, ClubName: settings.ClubName, WarnMinutes: settings.WarnMinutes,
+		DesktopWallpaperVer: settings.DesktopWallpaperVer, LockScreenVer: settings.LockScreenVer, NamePosition: settings.NamePosition}
 	sess, err := store.OpenSessionForPC(s.st.DB, pcID)
 	if err != nil {
 		return ds, err

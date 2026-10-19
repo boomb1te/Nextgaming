@@ -26,6 +26,8 @@ type SessionView struct {
 	TariffName        string             `json:"tariffName"`
 	CheckoutRequested bool               `json:"checkoutRequested"`
 	Note              string             `json:"note,omitempty"`
+	ClientID          int64              `json:"clientId,omitempty"`   // attached client (credited the hours), 0 = none
+	ClientName        string             `json:"clientName,omitempty"` // that client's name, for display
 }
 
 // WoLView is Wake-on-LAN state plus guidance.
@@ -118,6 +120,12 @@ func (s *Server) BuildSnapshot() (*Snapshot, error) {
 			sv := &SessionView{ID: sess.ID, Mode: sess.Mode, Status: sess.Status, StartedAt: sess.StartedAt,
 				ElapsedSec: sess.ActiveSeconds(now), Paid: sess.Paid, RatePerHour: sess.RatePerHour,
 				TariffName: sess.TariffName, CheckoutRequested: sess.CheckoutRequested, Note: sess.Note}
+			if sess.CustomerID != nil && *sess.CustomerID > 0 {
+				sv.ClientID = *sess.CustomerID
+				if c, err := store.ClientByID(s.st.DB, *sess.CustomerID); err == nil {
+					sv.ClientName = c.Name
+				}
+			}
 			switch sess.Mode {
 			case core.ModePrepaid:
 				sv.RemainingSec = max(sess.RemainingSeconds(now), 0)

@@ -70,6 +70,9 @@ func NewLauncher(clientPath string, args []string, asSystem bool) Launcher {
 	return &procLauncher{path: clientPath, args: args}
 }
 
+// RunOnceInSession is a no-op off Windows (no real desktop wallpaper to set).
+func RunOnceInSession(path string, args []string) error { return nil }
+
 type procLauncher struct {
 	mu   sync.Mutex
 	path string

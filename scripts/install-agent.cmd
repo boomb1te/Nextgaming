@@ -18,10 +18,12 @@ timeout /t 2 /nobreak >nul
 
 copy /Y "%~dp0nextgaming-agent.exe" "%DEST%\" >nul || goto :fail
 copy /Y "%~dp0nextgaming-client.exe" "%DEST%\" >nul || goto :fail
-"%DEST%\nextgaming-agent.exe" install -server %1 -key %2 || goto :fail
+rem The installer checks the server and club key first; if that fails it has
+rem already printed the reason, so just stop (don't show the generic message).
+"%DEST%\nextgaming-agent.exe" install -server %1 -key %2 || exit /b 1
 echo.
 echo Done. This PC will appear in the admin panel within a few seconds.
 exit /b 0
 :fail
-echo Installation failed. Are you running as Administrator?
+echo Could not copy the program files. Are you running as Administrator?
 exit /b 1

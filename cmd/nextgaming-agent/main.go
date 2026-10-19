@@ -93,11 +93,20 @@ func main() {
 		if cfg.Server == "" || cfg.ClubKey == "" {
 			fatal("both -server and -key are required")
 		}
+		// Check the server and club key before installing anything, so a typo
+		// fails here with a clear message instead of producing a PC that locks
+		// its screen but never appears in the admin panel.
+		fmt.Printf("Checking the server and club key…\n")
+		pcName, clubName, err := agent.VerifyServer(cfg)
+		if err != nil {
+			fatal("%v\n\nNothing was installed. Fix the server address or club key and try again.\n(The club key is shown in the admin panel under Settings.)", err)
+		}
+		fmt.Printf("Key accepted — this PC will join \"%s\" as %s.\n", clubName, pcName)
 		cfg.InstalledAt = time.Now()
 		if err := cfg.Save(); err != nil {
 			fatal("%v", err)
 		}
-		err := svcrun.Install(svcrun.Spec{
+		err = svcrun.Install(svcrun.Spec{
 			Name: serviceName, DisplayName: "NextGaming Agent",
 			Description: "Connects this gaming PC to the NextGaming server and controls the lock screen.",
 			Args:        []string{"run", "-data", *dataDir},

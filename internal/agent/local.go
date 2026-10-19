@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -24,6 +25,20 @@ func (a *Agent) serveLocal(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.ClientState())
+	})
+	// The lock screen fetches its background image here when LockScreenVer changes.
+	mux.HandleFunc("GET /lock-bg", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-NextGaming-Client") != "1" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		b, err := os.ReadFile(a.assetPath(protocol.AssetLockBg))
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", http.DetectContentType(b))
+		w.Write(b)
 	})
 	mux.HandleFunc("POST /staff-login", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-NextGaming-Client") != "1" {

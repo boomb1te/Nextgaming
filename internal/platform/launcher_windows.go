@@ -231,6 +231,31 @@ func startInSession(path string, args []string, session uint32, asSystem bool) (
 	return pi.Process, pi.ProcessId, nil
 }
 
+// RunOnceInSession starts a short-lived helper on the active user's desktop and
+// returns immediately (it does not wait). Used for one-shot tasks such as
+// setting the desktop wallpaper, which must run as the logged-in user. When the
+// agent is not a service (dev/console), it runs the helper locally instead.
+func RunOnceInSession(path string, args []string) error {
+	if svcrun.IsService() {
+		session := windows.WTSGetActiveConsoleSessionId()
+		if session == noSession || session == 0 {
+			return fmt.Errorf("no interactive session")
+		}
+		h, _, err := startInSession(path, args, session, false)
+		if err != nil {
+			return err
+		}
+		windows.CloseHandle(h)
+		return nil
+	}
+	h, _, err := startLocal(path, args)
+	if err != nil {
+		return err
+	}
+	windows.CloseHandle(h)
+	return nil
+}
+
 // killStale ends lock-screen processes left over from a previous agent run.
 func killStale(image string) {
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)

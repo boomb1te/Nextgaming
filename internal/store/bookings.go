@@ -69,6 +69,20 @@ func SetBookingStatus(q Q, id int64, status core.BookingStatus, startedAt time.T
 	return err
 }
 
+// DeleteBooking removes a booking and its PC links. Any sessions it started are
+// detached (set booking_id=0) so a running session is never broken by the
+// delete — only the reservation record goes away.
+func DeleteBooking(q Q, id int64) error {
+	if _, err := q.Exec("UPDATE sessions SET booking_id=0 WHERE booking_id=?", id); err != nil {
+		return err
+	}
+	if _, err := q.Exec("DELETE FROM booking_pcs WHERE booking_id=?", id); err != nil {
+		return err
+	}
+	_, err := q.Exec("DELETE FROM bookings WHERE id=?", id)
+	return err
+}
+
 func scanBooking(row interface{ Scan(...any) error }) (core.Booking, error) {
 	var b core.Booking
 	var start, end, created, started int64

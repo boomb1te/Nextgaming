@@ -121,6 +121,11 @@ type localState struct {
 	// WasStopped is set when someone stopped the agent service; it is reported
 	// to the server (and cleared) on the next connection.
 	WasStopped bool `json:"wasStopped,omitempty"`
+	// Appearance: where to show the PC name on the lock screen, and the versions
+	// of the images the agent currently has on disk (desktop.img / lock_bg.img).
+	NamePosition string `json:"namePosition,omitempty"`
+	DesktopVer   int    `json:"desktopVer,omitempty"`
+	LockVer      int    `json:"lockVer,omitempty"`
 }
 
 // Agent is the running agent.
@@ -130,6 +135,7 @@ type Agent struct {
 	launcher platform.Launcher
 
 	capLauncher platform.Launcher
+	clientPath  string // the lock-screen/helper exe, for one-shot wallpaper sets
 
 	sharedDir string // the one folder exposed to the front desk (file sharing)
 
@@ -174,6 +180,56 @@ func New(cfg Config) *Agent {
 	a.st = localState{Locked: true}
 	a.loadState()
 	return a
+}
+
+// VerifyServer does a one-shot handshake with the server to confirm the server
+// is reachable and the club key is correct, BEFORE the service is installed.
+// This turns a mistyped key into a clear error at install time instead of an
+// invisible, permanently locked PC. On success it returns the PC and club names
+// the server reports, so the installer can confirm which club it joined.
+func VerifyServer(cfg Config) (pcName, clubName string, err error) {
+	if cfg.Server == "" || cfg.ClubKey == "" {
+		return "", "", errors.New("both -server and -key are required")
+	}
+	a := New(cfg)
+	a.inv = platform.GetInventory(cfg.dataDir)
+	if cfg.MachineID != "" {
+		a.inv.MachineID = cfg.MachineID
+		a.inv.Hostname = a.inv.Hostname + "-" + cfg.MachineID
+	} else {
+		a.inv.MachineID = a.stableID(a.inv)
+	}
+
+	d := net.Dialer{Timeout: 5 * time.Second}
+	raw, err := d.Dial("tcp", cfg.Server)
+	if err != nil {
+		return "", "", fmt.Errorf("cannot reach the server at %s (check the address and that both PCs are on the same network): %w", cfg.Server, err)
+	}
+	defer raw.Close()
+	conn := protocol.NewConn(raw)
+	hello := protocol.Hello{
+		ProtocolVersion: protocol.Version, ClubKey: cfg.ClubKey, MachineID: a.inv.MachineID,
+		Hostname: a.inv.Hostname, AgentVersion: Version, NICs: platform.NICs(),
+		BoardMaker: a.inv.BoardMaker, BoardProduct: a.inv.BoardProduct,
+	}
+	if err := conn.Send(protocol.TypeHello, "", hello); err != nil {
+		return "", "", fmt.Errorf("cannot talk to the server: %w", err)
+	}
+	raw.SetReadDeadline(time.Now().Add(10 * time.Second))
+	env, err := conn.Recv()
+	if err != nil {
+		return "", "", fmt.Errorf("no reply from the server at %s: %w", cfg.Server, err)
+	}
+	switch env.Type {
+	case protocol.TypeWelcome:
+		w, _ := protocol.Decode[protocol.Welcome](env)
+		return w.PCName, w.ClubName, nil
+	case protocol.TypeReject:
+		rej, _ := protocol.Decode[protocol.Reject](env)
+		return "", "", fmt.Errorf("the server refused this PC: %s", rej.Reason)
+	default:
+		return "", "", fmt.Errorf("unexpected reply %q from the server", env.Type)
+	}
 }
 
 func (a *Agent) statePath() string { return filepath.Join(a.cfg.dataDir, "agent-state.json") }
@@ -230,6 +286,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		clientPath = filepath.Join(filepath.Dir(exe), name)
 	}
+	a.clientPath = clientPath
 	a.launcher = platform.NewLauncher(clientPath, []string{"-port", fmt.Sprint(a.cfg.LocalPort)}, a.cfg.ClientAsSystem)
 	defer a.launcher.Stop()
 	// Screen capture must run as the logged-in user: a SYSTEM process's GDI
@@ -402,7 +459,8 @@ func (a *Agent) session(ctx context.Context) error {
 		Hostname: a.inv.Hostname, AgentVersion: Version, NICs: platform.NICs(),
 		BoardMaker: a.inv.BoardMaker, BoardProduct: a.inv.BoardProduct,
 		Locked: a.st.Locked, SessionID: a.st.SessionID,
-		InstalledAt: a.cfg.InstalledAt,
+		InstalledAt:         a.cfg.InstalledAt,
+		DesktopWallpaperVer: a.st.DesktopVer, LockScreenVer: a.st.LockVer,
 	}
 	a.mu.Unlock()
 	if err := conn.Send(protocol.TypeHello, "", hello); err != nil {
@@ -567,6 +625,11 @@ func (a *Agent) handle(conn *protocol.Conn, env protocol.Envelope) {
 		if err == nil {
 			go a.fsPull(req)
 		}
+	case protocol.TypeAsset:
+		as, err := protocol.Decode[protocol.Asset](env)
+		if err == nil {
+			go a.handleAsset(as)
+		}
 	}
 }
 
@@ -658,6 +721,7 @@ func (a *Agent) apply(ds protocol.DesiredState) {
 	a.st.SessionID = ds.SessionID
 	a.st.Mode = ds.Mode
 	a.st.PCName, a.st.ClubName, a.st.WarnMinutes = ds.PCName, ds.ClubName, ds.WarnMinutes
+	a.st.NamePosition = ds.NamePosition
 	a.st.TariffName, a.st.RatePerHour, a.st.Paid, a.st.Currency = ds.TariffName, ds.RatePerHour, ds.Paid, ds.Currency
 	a.st.GraceSeconds, a.st.MinChargeMinutes = ds.GraceSeconds, ds.MinChargeMinutes
 	a.st.Deadline, a.st.CountFrom = time.Time{}, time.Time{}
@@ -705,6 +769,7 @@ func (a *Agent) ClientState() protocol.ClientState {
 		Locked: a.st.Locked, Paused: a.st.Paused, Mode: a.st.Mode, SessionID: a.st.SessionID,
 		PCName: a.st.PCName, ClubName: a.st.ClubName, ServerOnline: a.online,
 		WarnMinutes: a.st.WarnMinutes, Message: a.message, MessageID: a.messageID,
+		NamePosition: a.st.NamePosition, LockScreenVer: a.st.LockVer,
 	}
 	if u := a.ctrlUntil.Load(); u != 0 && time.Now().UnixNano() < u {
 		cs.Controlled = true

@@ -17,6 +17,7 @@ type StartRequest struct {
 	PackageID int64            `json:"packageId"` // prepaid: a package...
 	Minutes   int              `json:"minutes"`   // ...or a number of minutes at the hourly rate
 	Note      string           `json:"note"`
+	ClientID  int64            `json:"clientId"` // optional: credit this client's hours
 }
 
 // TimeRequest adds time to a prepaid session.
@@ -133,6 +134,13 @@ func (s *Server) StartSession(adminID, pcID int64, req StartRequest) (*core.Sess
 		rate := s.zoneRate(q, pc)
 		sess = &core.Session{PCID: pcID, Mode: req.Mode, Status: core.StatusActive, StartedAt: now,
 			RatePerHour: rate, StartedBy: adminID, ShiftID: shiftID, Note: strings.TrimSpace(req.Note)}
+		if req.ClientID > 0 {
+			if _, err := store.ClientByID(q, req.ClientID); err != nil {
+				return errBad("the chosen client does not exist")
+			}
+			cid := req.ClientID
+			sess.CustomerID = &cid
+		}
 		var price core.Money
 		if req.Mode == core.ModePrepaid {
 			minutes, p, label, err := s.pricing(q, pc, rate, req.PackageID, req.Minutes, now)
@@ -228,6 +236,23 @@ func (s *Server) withOpenSession(pcID int64, fn func(q store.Q, sess *core.Sessi
 	s.pushState(pcID)
 	s.changed()
 	return nil
+}
+
+// SetSessionClient attaches a client to the PC's open session (so its hours are
+// credited to that client), or detaches when clientID is 0.
+func (s *Server) SetSessionClient(adminID, pcID, clientID int64) error {
+	return s.withOpenSession(pcID, func(q store.Q, sess *core.Session) error {
+		if clientID > 0 {
+			if _, err := store.ClientByID(q, clientID); err != nil {
+				return errBad("the chosen client does not exist")
+			}
+			cid := clientID
+			sess.CustomerID = &cid
+		} else {
+			sess.CustomerID = nil
+		}
+		return store.Audit(q, adminID, "session_client", pcID, fmt.Sprintf("session %d -> client %d", sess.ID, clientID))
+	})
 }
 
 // AddTime extends a prepaid session.
@@ -699,6 +724,14 @@ func (s *Server) SaveSettings(adminID int64, st core.Settings) error {
 	}
 	if st.GraceSeconds < 0 || st.MinChargeMinutes < 0 {
 		return errBad("values must not be negative")
+	}
+	// The image versions are owned by the upload endpoints, not this form — keep
+	// whatever is current so a settings save can't reset them.
+	cur := s.Settings()
+	st.DesktopWallpaperVer = cur.DesktopWallpaperVer
+	st.LockScreenVer = cur.LockScreenVer
+	if st.NamePosition != "top-left" {
+		st.NamePosition = "center"
 	}
 	var warn []int
 	for _, m := range st.WarnMinutes {

@@ -7,6 +7,7 @@ const S = {
   me: null, snap: null, snapAt: 0, tab: 'pcs', live: false, es: null,
   seenAlert: -1, reportDate: todayISO(), auditDate: todayISO(),
   selecting: false, selected: new Set(),
+  clientView: 'basic', // Clients sub-view: 'basic' | 'auth'
   screens: null, // live state of the Screens tab (see screens.js section)
 };
 
@@ -29,6 +30,102 @@ function h(tag, attrs, ...kids) {
     el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
   }
   return el;
+}
+
+// Inline stroke-SVG icon (h() can't create SVG namespaces, so use innerHTML).
+const ICON = {
+  pcs: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+  screens: '<rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8"/>',
+  files: '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>',
+  log: '<path d="M4 5h16M4 12h16M4 19h10"/>',
+  clients: '<circle cx="12" cy="8" r="3.4"/><path d="M5 20a7 7 0 0114 0"/>',
+  bookings: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18M8 2v4M16 2v4"/>',
+  shift: '<rect x="2" y="6" width="20" height="13" rx="2"/><path d="M2 10h20M6 15h4"/>',
+  reports: '<path d="M5 20V9M12 20V4M19 20v-7"/>',
+  settings: '<circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>',
+  lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
+  note: '<path d="M4 20h4L18.5 9.5l-4-4L4 16z"/><path d="M13 7l4 4"/>',
+  mouse: '<rect x="7" y="3" width="10" height="18" rx="5"/><path d="M12 7v3"/>',
+  move: '<path d="M7 7h11l-3-3M17 17H6l3 3"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.6" r="0.7" fill="currentColor" stroke="none"/>',
+  warn: '<path d="M12 9v4M12 17h.01M10.3 3.9L2 18a2 2 0 001.7 3h16.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/>',
+  control: '<path d="M4 4l16 8-7 2-2 7z"/>',
+  camera: '<path d="M4 7h3l2-2h6l2 2h3v12H4z"/><circle cx="12" cy="13" r="3.5"/>',
+  msg: '<path d="M4 5h16v11H8l-4 4z"/>',
+  bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
+  power: '<path d="M12 3v9"/><path d="M6.4 7.2a8 8 0 1011.2 0"/>',
+  more: '<circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/>',
+  chevron: '<path d="M6 9l6 6 6-6"/>',
+  check: '<path d="M5 12l5 5L20 7"/>',
+  folder: '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>',
+  file: '<path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5"/>',
+  up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  download: '<path d="M12 3v12M7 10l5 5 5-5M5 20h14"/>',
+  send: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+};
+// Status → .badge variant for the PC tile pill (color always paired with a label).
+const STATE_BADGE = { free: 'ok', busy: 'info', paused: 'warn', checkout: 'warn', staff: 'purple', offline: '' };
+const STATE_DOT = { free: 'green', busy: 'blue', paused: 'amber', checkout: 'amber', staff: 'purple', offline: 'gray' };
+function statusBadge(state) {
+  const v = STATE_BADGE[state];
+  const b = h('span', { class: 'badge stbadge' + (v && v !== 'purple' ? ' ' + v : '') },
+    h('i', { class: 'dot', style: `background:var(--${STATE_DOT[state] || 'gray'})` }),
+    STATE_LABEL[state] || state);
+  if (v === 'purple') { b.style.color = 'var(--purple)'; b.style.background = 'color-mix(in srgb, var(--purple) 16%, transparent)'; }
+  return b;
+}
+function ico(inner, size) {
+  const s = document.createElement('span');
+  s.className = 'ico'; s.setAttribute('aria-hidden', 'true');
+  s.innerHTML = `<svg width="${size || 18}" height="${size || 18}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${inner}</svg>`;
+  return s;
+}
+
+// ---------- Dropdown menus (design: NextGaming Dropdowns) ----------
+// One click-anywhere listener closes every open menu.
+let _ddWired = false;
+function wireDropdowns() {
+  if (_ddWired) return; _ddWired = true;
+  document.addEventListener('click', () => document.querySelectorAll('.dd.open').forEach(d => d.classList.remove('open')));
+}
+// Toggle one dropdown, closing any others first.
+function toggleDD(dd) {
+  const open = !dd.classList.contains('open');
+  document.querySelectorAll('.dd.open').forEach(d => { if (d !== dd) d.classList.remove('open'); });
+  dd.classList.toggle('open', open);
+}
+// dropdown(trigger, items[, opts]) — generic menu. items: elements built with
+// menuItem(), or menuSep()/menuCap(). trigger is a .btn (or any element).
+function dropdown(trigger, items, opts = {}) {
+  wireDropdowns();
+  const menu = h('div', { class: 'menu' + (opts.right ? ' right' : '') + (opts.scroll ? ' scroll' : '') },
+    items && items.length ? items : h('div', { class: 'mmempty' }, opts.empty || 'Nothing here'));
+  trigger.classList.add('dd-trigger');
+  trigger.addEventListener('click', ev => { ev.stopPropagation(); toggleDD(dd); });
+  menu.addEventListener('click', ev => ev.stopPropagation());
+  const dd = h('span', { class: 'dd' }, trigger, menu);
+  return dd;
+}
+function menuItem(label, onClick, opts = {}) {
+  return h('button', { class: 'mi' + (opts.sel ? ' sel' : '') + (opts.danger ? ' danger' : ''), type: 'button', disabled: !!opts.disabled,
+    onclick: ev => { ev.stopPropagation(); const dd = ev.target.closest('.dd'); if (dd) dd.classList.remove('open'); onClick && onClick(ev); } },
+    opts.check ? h('span', { class: 'check' }, ico(ICON.check, 15)) : (opts.icon ? ico(opts.icon, 16) : null),
+    h('span', { class: 'grow' }, label),
+    opts.hint ? h('span', { class: 'hint' }, opts.hint) : null);
+}
+const menuSep = () => h('div', { class: 'msep' });
+const menuCap = t => h('div', { class: 'mcap' }, t);
+// selectMenu(options, current, onPick[, opts]) — themed <select> replacement.
+// options: [{value, label, hint}]. Shows a check on the chosen row.
+function selectMenu(options, current, onPick, opts = {}) {
+  const cur = options.find(o => o.value === current);
+  const trigger = h('button', { class: 'btn selbtn' + (opts.block ? ' block' : '') + (opts.small ? ' small' : ''), type: 'button' },
+    h('span', { class: 'selval' },
+      opts.label ? h('span', { class: 'sellbl' }, opts.label) : null,
+      h('span', { class: 'val' }, cur ? cur.label : (opts.placeholder || '—'))),
+    h('span', { class: 'caret' }, ico(ICON.chevron, 15)));
+  const items = options.map(o => menuItem(o.label, () => onPick(o.value), { check: true, sel: o.value === current, hint: o.hint }));
+  return dropdown(trigger, items, { right: opts.right, scroll: opts.scroll, empty: opts.empty });
 }
 
 function todayISO() {
@@ -135,7 +232,12 @@ function confirmBox(title, text, okLabel, danger) {
   return new Promise(resolve => {
     let done = false;
     const finish = v => { if (!done) { done = true; m.close(); resolve(v); } };
-    const m = modal(title, h('p', null, text), [
+    const body = danger
+      ? h('div', { class: 'row', style: 'align-items:flex-start;gap:12px;flex-wrap:nowrap' },
+          h('span', { class: 'warnico' }, ico(ICON.warn, 20)),
+          h('p', { style: 'margin:0' }, text))
+      : h('p', null, text);
+    const m = modal(title, body, [
       h('button', { class: 'btn', onclick: () => finish(false) }, 'Cancel'),
       h('button', { class: 'btn ' + (danger ? 'danger' : 'primary'), onclick: () => finish(true) }, okLabel || 'OK'),
     ]);
@@ -145,7 +247,7 @@ function confirmBox(title, text, okLabel, danger) {
 }
 
 function field(label, input, hint) {
-  return h('label', { class: 'field' }, h('span', null, label), input, hint ? h('span', null, hint) : null);
+  return h('label', { class: 'field' }, h('span', { class: 'fl' }, label), input, hint ? h('span', { class: 'fl' }, hint) : null);
 }
 
 // ---------- boot, setup, login ----------
@@ -242,18 +344,46 @@ function handleAlerts() {
 
 // ---------- shell ----------
 
+// sideItem builds one grouped-sidebar entry. view distinguishes Clients
+// sub-items that share the 'clients' tab; owner adds the Settings lock chip.
+function sideItem(tab, label, iconKey, opts) {
+  opts = opts || {};
+  const active = S.tab === tab && (!opts.view || (S.clientView || 'basic') === opts.view);
+  const b = h('button', { class: 'side-item' + (active ? ' on' : ''), 'data-tab': tab, 'data-view': opts.view || '', onclick: () => switchTab(tab, opts.view) });
+  b.append(ico(ICON[iconKey]), h('span', { class: 'grow' }, label));
+  if (opts.owner) { const lk = h('span', { class: 'side-lock', title: 'Owner account required' }); lk.append(ico(ICON.lock, 12), document.createTextNode('owner')); b.append(lk); }
+  return b;
+}
+
 function renderShell() {
-  const tabs = [['pcs', 'PCs'], ['screens', 'Screens'], ['files', 'Files'], ['bookings', 'Bookings'], ['clients', 'Clients'], ['shift', 'Shift & cash'], ['reports', 'Reports'], ['log', 'Activity log'], ['settings', 'Settings']];
-  document.getElementById('app').replaceChildren(
+  const nav = h('div', { class: 'side-nav' });
+  const groups = [
+    ['MANAGE', [sideItem('pcs', 'PCs', 'pcs'), sideItem('screens', 'Screens', 'screens'), sideItem('files', 'File sharing', 'files'), sideItem('log', 'Activity log', 'log')]],
+    ['CLIENTS', [sideItem('clients', 'Basic clients', 'clients', { view: 'basic' }), sideItem('clients', 'Authorized clients', 'clients', { view: 'auth' })]],
+    ['BOOKINGS', [sideItem('bookings', 'Book a PC', 'bookings')]],
+    ['FINANCE', [sideItem('shift', 'Shift & cash', 'shift'), sideItem('reports', 'Reports', 'reports')]],
+  ];
+  for (const [title, items] of groups) nav.append(h('div', { class: 'side-group' }, title), ...items);
+
+  const brand = h('div', { class: 'brand' }, h('span', { class: 'logo' }, 'N'), h('span', null, 'NextGaming'));
+  const acct = h('div', { class: 'side-acct' },
+    h('span', { class: 'av' }, (S.me.username || '?').slice(0, 1).toUpperCase()),
+    h('div', null, h('div', { class: 'nm' }, S.me.username), h('div', { class: 'rl' }, S.me.role)));
+  const logout = h('button', { class: 'btn small', style: 'margin:8px 12px 0', onclick: async () => { await api('POST', '/api/logout').catch(() => {}); S.me = null; renderLogin(); } }, 'Log out');
+  const sidebar = h('aside', { class: 'sidebar' }, brand, nav,
+    h('div', { class: 'side-bottom' }, sideItem('settings', 'Settings', 'settings', { owner: true }), acct, logout));
+  const content = h('div', { class: 'content' },
     h('header', { class: 'top', id: 'hdr' }),
-    h('nav', { class: 'tabs' }, tabs.map(([id, label]) =>
-      h('button', { 'data-tab': id, class: S.tab === id ? 'on' : '', onclick: () => { switchTab(id); } }, label))),
     h('div', { id: 'callbar' }),
     h('main', { id: 'main' }, h('p', { class: 'muted' }, 'Connecting…')));
+  document.getElementById('app').replaceChildren(h('div', { class: 'app-shell' }, sidebar, content));
 }
 
 function renderTabs() {
-  document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === S.tab));
+  document.querySelectorAll('.sidebar .side-item').forEach(b => {
+    const view = b.dataset.view;
+    b.classList.toggle('on', S.tab === b.dataset.tab && (!view || (S.clientView || 'basic') === view));
+  });
 }
 
 function renderHeader() {
@@ -265,11 +395,9 @@ function renderHeader() {
     h('h1', null, snap ? snap.settings.clubName : 'NextGaming'),
     shift
       ? h('span', { class: 'badge ok', title: 'Cash in the drawer should be this amount' }, `Shift open · cash ${money(shift.cashNow)}`)
-      : h('button', { class: 'btn small', onclick: () => { S.tab = 'shift'; renderTabs(); render(); } }, 'Open a shift'),
+      : h('button', { class: 'btn small', onclick: () => switchTab('shift') }, 'Open a shift'),
     h('span', { class: 'grow' }),
-    h('span', { class: 'conn' + (S.live ? '' : ' bad') }, S.live ? 'Live' : 'Reconnecting…'),
-    h('span', { class: 'muted small' }, `${S.me.username} (${S.me.role})`),
-    h('button', { class: 'btn small', onclick: async () => { await api('POST', '/api/logout').catch(() => {}); S.me = null; renderLogin(); } }, 'Log out'));
+    h('span', { class: 'conn' + (S.live ? '' : ' bad') }, S.live ? 'Live' : 'Reconnecting…'));
 }
 
 function render() {
@@ -280,9 +408,12 @@ function render() {
   const main = document.getElementById('main');
   if (S.tab !== 'screens') screensStop();
   if (S.tab !== 'files') filesStop();
+  // The view key folds the Clients sub-view in, so switching Basic/Authorized
+  // (same tab) still re-renders the content.
+  const key = S.tab + (S.tab === 'clients' ? ':' + (S.clientView || 'basic') : '');
   // Keep forms on Settings/Shift/Reports stable while snapshots stream in.
   if (S.tab === 'pcs') main.replaceChildren(renderPCs());
-  else if (main.dataset.tab !== S.tab) {
+  else if (main.dataset.tab !== key) {
     if (S.tab === 'screens') main.replaceChildren(renderScreens());
     if (S.tab === 'files') main.replaceChildren(renderFiles());
     if (S.tab === 'bookings') main.replaceChildren(renderBookings());
@@ -298,14 +429,14 @@ function render() {
     if (live) live.replaceChildren(shiftLive());
     if (!!S.snap.shift !== (main.dataset.shiftOpen === '1')) main.replaceChildren(renderShift());
   }
-  main.dataset.tab = S.tab;
+  main.dataset.tab = key;
 }
 
 // Re-render only the view (used after actions on non-live tabs).
 function rerender() { const m = document.getElementById('main'); if (m) m.dataset.tab = ''; render(); }
 
-// switchTab changes the active tab and stops screen monitoring when leaving it.
-function switchTab(id) { S.tab = id; renderTabs(); render(); }
+// switchTab changes the active tab (and Clients sub-view) and refreshes the nav.
+function switchTab(id, view) { S.tab = id; if (view) S.clientView = view; renderTabs(); render(); }
 
 // ---------- live timers ----------
 
@@ -337,6 +468,8 @@ function wolBadge(pc) {
 function tileTimer(pc) {
   const s = pc.session;
   if (!s) return h('div', { class: 'timer muted' }, pc.runtime.online ? '—' : '');
+  // Checkout: the player wants to pay — show the amount owed, not the clock.
+  if (s.checkoutRequested && s.mode === 'open') return h('div', { class: 'timer', style: 'color:var(--amber)' }, money(s.due) + ' due');
   if (s.status === 'paused') return h('div', { class: 'timer' }, s.mode === 'prepaid' ? dur(s.remainingSec) : dur(s.elapsedSec));
   if (s.mode === 'prepaid') return h('div', { class: 'timer' + (s.remainingSec < 300 ? ' low' : ''), 'data-rem': s.remainingSec }, dur(s.remainingSec));
   return h('div', { class: 'timer', 'data-el': s.elapsedSec }, dur(s.elapsedSec));
@@ -345,6 +478,7 @@ function tileTimer(pc) {
 function tileSub(pc) {
   const s = pc.session;
   if (!s) return pc.zoneName || '';
+  if (s.checkoutRequested) return `${s.clientName || (s.mode === 'open' ? 'Open session' : s.tariffName)} · ${dur(s.elapsedSec)}`;
   if (s.mode === 'prepaid') return `${s.tariffName} · paid ${money(s.paid)}`;
   if (s.mode === 'open') return `Open · due ${money(s.due)}`;
   return s.tariffName;
@@ -357,17 +491,27 @@ function renderPCs() {
   for (const id of [...S.selected]) if (!pcs.find(p => p.id === id)) S.selected.delete(id);
   const counts = pcs.reduce((c, p) => (c[p.state] = (c[p.state] || 0) + 1, c), {});
 
+  const endingSoon = pcs.filter(p => p.session && p.session.mode === 'prepaid' && p.session.status === 'active' && p.session.remainingSec < 600).length;
   const selectBtn = h('button', { class: 'btn' + (S.selecting ? ' primary' : ''), onclick: () => {
     S.selecting = !S.selecting; if (!S.selecting) S.selected.clear(); rerenderPCs();
-  } }, S.selecting ? 'Done selecting' : 'Select');
+  } }, S.selecting ? 'Done selecting' : 'Select PCs');
 
+  // At-a-glance count pills (status colour on a dot, always with a label).
+  const cpill = (label, colorVar, n, cls) => n ? h('span', { class: 'cpill' + (cls ? ' ' + cls : '') }, h('i', { style: `background:var(--${colorVar})` }), h('b', null, String(n)), ' ' + label) : null;
+  const countRow = h('div', { class: 'countrow' },
+    cpill('free', 'green', counts.free || 0),
+    cpill('in session', 'blue', counts.busy || 0),
+    cpill('ending soon', 'amber', endingSoon),
+    cpill('needs checkout', 'amber', counts.checkout || 0, 'attn'),
+    cpill('paused', 'gray', counts.paused || 0),
+    cpill('staff', 'purple', counts.staff || 0),
+    cpill('offline', 'gray', counts.offline || 0),
+    h('span', { class: 'grow' }),
+    selectBtn);
   const toolbar = h('div', { class: 'toolbar' },
-    selectBtn,
-    h('button', { class: 'btn', onclick: e => bulk(e.target, 'wake') }, 'Wake all offline PCs'),
-    h('button', { class: 'btn', onclick: e => bulk(e.target, 'shutdown_free') }, 'Shut down free PCs'),
-    h('button', { class: 'btn', onclick: () => messageModal(null) }, 'Message all'),
-    h('div', { class: 'legend' }, Object.entries(STATE_LABEL).map(([k, v]) =>
-      h('span', null, h('i', { class: 'st-' + k, style: `background:var(--${{ free: 'green', busy: 'blue', paused: 'amber', checkout: 'red', staff: 'purple', offline: 'gray' }[k]})` }), `${v} ${counts[k] || 0}`))));
+    h('button', { class: 'btn small', onclick: e => bulk(e.target, 'wake') }, ico(ICON.bolt, 14), 'Wake all offline'),
+    h('button', { class: 'btn small', onclick: e => bulk(e.target, 'shutdown_free') }, ico(ICON.power, 14), 'Shut down free'),
+    h('button', { class: 'btn small', onclick: () => messageModal(null) }, ico(ICON.msg, 14), 'Message all'));
 
   if (!pcs.length) {
     return h('div', null, toolbar, h('div', { class: 'card' },
@@ -378,22 +522,47 @@ function renderPCs() {
 
   const grid = h('div', { class: 'grid' }, pcs.map(pc => {
     const on = S.selected.has(pc.id);
-    return h('div', { class: 'tile st-' + pc.state + (S.selecting && on ? ' selected' : ''), onclick: () => {
-      if (S.selecting) { on ? S.selected.delete(pc.id) : S.selected.add(pc.id); rerenderPCs(); }
-      else pcModal(pc.id);
+    // Single click opens the dialog; double click is a shortcut (free → start an
+    // open session, in a session → go to settle & end). The short delay lets a
+    // double click cancel the dialog so it doesn't flash open first.
+    let clickT = null;
+    const tile = h('div', { class: 'tile st-' + pc.state + (S.selecting && on ? ' selected' : ''), onclick: () => {
+      if (S.selecting) { on ? S.selected.delete(pc.id) : S.selected.add(pc.id); rerenderPCs(); return; }
+      if (clickT) return;
+      clickT = setTimeout(() => { clickT = null; pcModal(pc.id); }, 220);
+    }, ondblclick: () => {
+      if (S.selecting) return;
+      if (clickT) { clearTimeout(clickT); clickT = null; }
+      quickTileAction(pc);
     } },
       S.selecting ? h('div', { class: 'tickbox' }, on ? '✓' : '') : null,
-      h('div', { class: 'name' }, pc.name, pc.note ? h('span', { class: 'noteflag', title: pc.note }, '📝') : null, wolBadge(pc)),
-      h('div', { class: 'state' }, STATE_LABEL[pc.state] || pc.state),
+      h('div', { class: 'name' },
+        h('span', { class: 'nm' }, pc.name, pc.note ? h('span', { class: 'noteflag', title: pc.note }, ico(ICON.note, 13)) : null),
+        h('span', { class: 'namebadges' }, wolBadge(pc), statusBadge(pc.state))),
       tileTimer(pc),
       h('div', { class: 'sub' }, tileSub(pc)),
-      pc.nextBooking ? h('div', { class: 'booked' }, `📅 Booked ${timeStr(pc.nextBooking.at)} — ${pc.nextBooking.who}`) : null,
-      pc.controlled ? h('div', { class: 'controlled' }, '🖱 Being controlled') : null,
+      pc.nextBooking ? h('div', { class: 'booked' }, ico(ICON.bookings, 13), ` Booked ${timeStr(pc.nextBooking.at)} — ${pc.nextBooking.who}`) : null,
+      pc.controlled ? h('div', { class: 'controlled' }, ico(ICON.mouse, 13), ' Being controlled') : null,
       pc.runtime.online && !pc.runtime.clientAlive ? h('div', { class: 'warn' }, 'Lock screen not running') : null,
       !pc.runtime.online && pc.session ? h('div', { class: 'warn' }, 'Offline during session') : null);
+    return tile;
   }));
 
-  return h('div', null, toolbar, S.selecting ? selectionBar(pcs) : null, grid);
+  return h('div', null, countRow, toolbar, S.selecting ? selectionBar(pcs) : null, grid);
+}
+
+// quickTileAction handles a double click on a PC tile: a free PC starts an open
+// (pay-at-the-end) session straight away; a PC in a paid session jumps to the
+// settle & end dialog. Everything else falls back to the full dialog.
+function quickTileAction(pc) {
+  if (pc.session && pc.session.mode !== 'free') { endModal(pc.id); return; }
+  if (pc.state === 'free' && pc.runtime.online) {
+    api('POST', `/api/pcs/${pc.id}/start`, { mode: 'open' })
+      .then(() => toast(`${pc.name}: open session started (pay at the end)`, 'ok'))
+      .catch(e => toast(e.message, 'error'));
+    return;
+  }
+  pcModal(pc.id);
 }
 
 // Re-render just the PCs tab (selection changes shouldn't wait for a snapshot).
@@ -466,56 +635,121 @@ function pcModal(id) {
   const run = (fn, ok) => async e => { try { await act(e.target, fn, ok); m.close(); } catch (err) { /* toast shown */ } };
   const then = f => () => { m.close(); f(); };
 
-  const info = h('dl', { class: 'kv' },
-    h('dt', null, 'Status'), h('dd', null, STATE_LABEL[pc.state], online ? '' : ` (last seen ${dateTimeStr(pc.runtime.lastSeen)})`),
-    h('dt', null, 'Zone'), h('dd', null, pc.zoneName || '—', pc.zoneId && zoneById(pc.zoneId) ? ` · ${money(zoneById(pc.zoneId).hourlyRate)}/h` : ''),
-    s ? [
-      h('dt', null, 'Session'), h('dd', null, `${s.tariffName} · started ${timeStr(s.startedAt)}`),
-      s.mode === 'prepaid' ? [h('dt', null, 'Time left'), h('dd', null, dur(s.remainingSec))] : [h('dt', null, 'Time used'), h('dd', null, dur(s.elapsedSec))],
-      s.mode === 'open' ? [h('dt', null, 'Due now'), h('dd', null, money(s.due))] : [h('dt', null, 'Paid'), h('dd', null, money(s.paid))],
-      s.note ? [h('dt', null, 'Note'), h('dd', null, s.note)] : null,
-    ] : null,
-    h('dt', null, 'Network'), h('dd', null, `${pc.ip || '—'} · MAC ${pc.mac || '—'}`),
-    h('dt', null, 'Computer'), h('dd', null, `${pc.hostname || '—'} · ${[pc.boardMaker, pc.boardProduct].filter(Boolean).join(' ') || 'board unknown'}`),
-    online ? [h('dt', null, 'Lock screen'), h('dd', null, pc.runtime.clientAlive ? 'running' : h('b', { style: 'color:var(--red)' }, 'not running'))] : null);
+  const B = (label, cls, fn) => h('button', { class: 'btn' + (cls ? ' ' + cls : ''), onclick: fn }, label);
 
-  const btns = [];
+  // --- session summary card ---
+  let card = null;
+  if (s) {
+    const paused = s.status === 'paused';
+    let big, prog = null;
+    if (s.mode === 'prepaid') {
+      const total = Math.max(1, s.elapsedSec + s.remainingSec);
+      const pct = Math.max(0, Math.min(100, Math.round(100 * s.elapsedSec / total)));
+      big = h('div', { class: 'row', style: 'align-items:baseline;gap:10px;margin-top:8px' },
+        h('div', Object.assign({ class: 'sess-big' + (s.remainingSec < 300 ? ' low' : '') }, paused ? {} : { 'data-rem': s.remainingSec }), dur(s.remainingSec)),
+        h('span', { class: 'muted small' }, 'left of ' + dur(total)));
+      prog = h('div', { class: 'sess-prog' }, h('i', { style: `width:${pct}%` }));
+    } else {
+      big = h('div', { class: 'row', style: 'align-items:baseline;gap:10px;margin-top:8px' },
+        h('div', Object.assign({ class: 'sess-big' }, paused ? {} : { 'data-el': s.elapsedSec }), dur(s.elapsedSec)),
+        h('span', { class: 'muted small' }, 'used'));
+    }
+    card = h('div', { class: 'sess-card' },
+      h('div', { class: 'row', style: 'justify-content:space-between;align-items:baseline' },
+        h('span', { class: 'muted small' }, `${s.tariffName} · started ${timeStr(s.startedAt)}`),
+        h('span', { class: 'muted small' }, s.mode === 'open' ? ['Due ', h('b', null, money(s.due))] : ['Paid ', h('b', null, money(s.paid))])),
+      big, prog,
+      s.clientName ? h('div', { class: 'row small', style: 'margin-top:12px;gap:8px' }, h('span', { class: 'muted' }, 'Credited to'), h('b', null, s.clientName)) : null,
+      paused ? h('div', { class: 'small', style: 'margin-top:10px;color:var(--amber)' }, 'Paused — the clock is stopped') : null);
+  }
+
+  // --- primary actions ---
+  const primary = [];
   if (pc.state === 'free') {
-    btns.push(h('button', { class: 'btn primary', onclick: then(() => startModal(pc.id)) }, 'Start session'));
-    btns.push(h('button', { class: 'btn', onclick: run(() => api('POST', `/api/pcs/${pc.id}/unlock-free`, {}), 'Unlocked for staff (not billed)') }, 'Unlock free (staff)'));
+    primary.push(B('Start session', 'primary', then(() => startModal(pc.id))));
+    primary.push(B('Unlock free (staff)', '', run(() => api('POST', `/api/pcs/${pc.id}/unlock-free`, {}), 'Unlocked for staff (not billed)')));
   }
   if (s) {
-    if (s.checkoutRequested) btns.push(h('button', { class: 'btn primary', onclick: then(() => endModal(pc.id)) }, 'Settle & end'));
-    if (s.mode === 'prepaid') btns.push(h('button', { class: 'btn' + (s.checkoutRequested ? '' : ' primary'), onclick: then(() => timeModal(pc.id)) }, 'Add time'));
-    if (s.mode !== 'free' && s.status === 'active') btns.push(h('button', { class: 'btn', onclick: run(() => api('POST', `/api/pcs/${pc.id}/pause`), 'Paused') }, 'Pause'));
-    if (s.status === 'paused') btns.push(h('button', { class: 'btn', onclick: run(() => api('POST', `/api/pcs/${pc.id}/resume`), 'Resumed') }, 'Resume'));
-    if (s.mode === 'free') btns.push(h('button', { class: 'btn primary', onclick: run(() => api('POST', `/api/pcs/${pc.id}/lock`), 'Locked') }, 'Lock'));
-    else if (!s.checkoutRequested) btns.push(h('button', { class: 'btn', onclick: then(() => endModal(pc.id)) }, 'End session'));
-    btns.push(h('button', { class: 'btn', onclick: then(() => moveModal(pc.id)) }, 'Move to another PC'));
+    if (s.checkoutRequested) primary.push(B('Settle & end', 'primary', then(() => endModal(pc.id))));
+    if (s.mode === 'prepaid') primary.push(B('Add time', s.checkoutRequested ? '' : 'primary', then(() => timeModal(pc.id))));
+    if (s.mode !== 'free' && s.status === 'active') primary.push(B('Pause', '', run(() => api('POST', `/api/pcs/${pc.id}/pause`), 'Paused')));
+    if (s.status === 'paused') primary.push(B('Resume', '', run(() => api('POST', `/api/pcs/${pc.id}/resume`), 'Resumed')));
+    if (s.mode === 'free') primary.push(B('Lock', 'primary', run(() => api('POST', `/api/pcs/${pc.id}/lock`), 'Locked')));
+    else if (!s.checkoutRequested) primary.push(B('End session', '', then(() => endModal(pc.id))));
   }
-  const power = [];
+
+  // --- LIVE icon row (online only) ---
+  let liveRow = null;
   if (online) {
-    power.push(h('button', { class: 'btn', onclick: then(() => messageModal(pc.id)) }, 'Send message'));
-    power.push(h('button', { class: 'btn', onclick: e => powerAction(e.target, pc, 'restart', m) }, 'Restart'));
-    power.push(h('button', { class: 'btn danger', onclick: e => powerAction(e.target, pc, 'shutdown', m) }, 'Shut down'));
-  } else {
-    power.push(h('button', { class: 'btn primary', disabled: !pc.mac, onclick: run(() => api('POST', `/api/pcs/${pc.id}/wake`), 'Wake signal sent. The PC should appear online within a minute.') }, 'Turn on (Wake-on-LAN)'));
+    const lb = (iconInner, label, fn, disabled, title) => {
+      const b = h('button', { class: 'live-btn', disabled: !!disabled, title: title || '' }, ico(iconInner, 18), h('span', null, label));
+      if (!disabled) b.onclick = fn;
+      return b;
+    };
+    liveRow = h('div', null, h('div', { class: 'live-lbl' }, 'LIVE'),
+      h('div', { class: 'live-grid' },
+        lb(ICON.control, 'Take control', then(() => controlModal(pc.id, pc.name)), pc.runtime.locked, pc.runtime.locked ? 'Unlock to control' : ''),
+        lb(ICON.screens, 'Watch', then(() => openScreenModal(pc.id))),
+        lb(ICON.camera, 'Snapshot', then(() => hdSnapshot(pc.id, pc.name))),
+        lb(ICON.msg, 'Message', then(() => messageModal(pc.id)))));
   }
 
-  // Per-PC note.
-  const noteInput = h('input', { type: 'text', maxlength: 500, value: pc.note || '', placeholder: 'e.g. keyboard replaced, VIP seat…', style: 'flex:1' });
-  const noteBtn = h('button', { class: 'btn' }, 'Save note');
-  noteBtn.onclick = e => act(e.target, () => api('POST', `/api/pcs/${pc.id}/note`, { note: noteInput.value }), 'Note saved').catch(() => {});
-  const noteSection = h('div', { class: 'section' },
-    h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'PC note'),
-    h('div', { class: 'row' }, noteInput, noteBtn));
+  // --- details + move, power ---
+  const moreRow = h('div', { class: 'row2' },
+    h('button', { class: 'btn', onclick: () => pcDetailsModal(pc.id) }, ico(ICON.info, 15), ' Details'),
+    s ? h('button', { class: 'btn', onclick: then(() => moveModal(pc.id)) }, ico(ICON.move, 15), ' Move to another PC') : null);
+  const powerRow = online
+    ? h('div', { class: 'row2' },
+        h('button', { class: 'btn', onclick: e => powerAction(e.target, pc, 'restart', m) }, 'Restart'),
+        h('button', { class: 'btn danger', onclick: e => powerAction(e.target, pc, 'shutdown', m) }, 'Shut down'))
+    : h('div', { class: 'row2' },
+        h('button', { class: 'btn primary', disabled: !pc.mac, onclick: run(() => api('POST', `/api/pcs/${pc.id}/wake`), 'Wake signal sent. The PC should appear online within a minute.') }, 'Turn on (Wake-on-LAN)'));
 
-  m = modal(pc.name, h('div', null,
-    info,
-    btns.length ? h('div', { class: 'section row' }, btns) : null,
-    h('div', { class: 'section row' }, power),
-    noteSection,
-    h('div', { class: 'section' }, wolSection(pc, () => m.close()))));
+  // --- credit-to-client + note ---
+  let clientSection = null;
+  if (s && s.mode !== 'free') {
+    const csel = clientSelectEl(s.clientId || 0, '— no client —');
+    const csave = h('button', { class: 'btn' }, 'Save');
+    csave.onclick = e => act(e.target, () => api('POST', `/api/pcs/${pc.id}/session/client`, { clientId: Number(csel.value) || 0 }), 'Updated').then(() => m.close()).catch(() => {});
+    clientSection = h('div', null, h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'Credit hours to client'), h('div', { class: 'row' }, csel, csave));
+  }
+  const noteInput = h('input', { type: 'text', maxlength: 500, value: pc.note || '', placeholder: 'Add a note…', style: 'flex:1' });
+  const noteBtn = h('button', { class: 'btn', onclick: e => act(e.target, () => api('POST', `/api/pcs/${pc.id}/note`, { note: noteInput.value }), 'Note saved').catch(() => {}) }, 'Save');
+  const noteSection = h('div', null, h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'PC note'), h('div', { class: 'row' }, noteInput, noteBtn));
+
+  const sections = [];
+  if (!s) sections.push(h('div', { class: 'muted small' }, online ? (STATE_LABEL[pc.state] + (pc.zoneName ? ' · ' + pc.zoneName : '')) : `Offline · last seen ${dateTimeStr(pc.runtime.lastSeen)}`));
+  if (card) sections.push(card);
+  if (primary.length) sections.push(h('div', { class: 'row2' }, primary));
+  if (liveRow) sections.push(liveRow);
+  sections.push(moreRow, powerRow);
+  if (clientSection) sections.push(clientSection);
+  sections.push(noteSection);
+
+  m = modal(pc.name, h('div', { class: 'pcm' }, sections));
+}
+
+// pcDetailsModal is the separate "Details" window: network, hardware, lock
+// screen and Wake-on-LAN. Opened from the Details button in the PC dialog.
+function pcDetailsModal(id) {
+  const pc = pcById(id);
+  if (!pc) return;
+  const online = pc.runtime.online;
+  const chip = v => h('span', { class: 'dtl-chip' }, v || '—');
+  const row = (k, v) => h('div', { class: 'dtl-row' }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, v));
+  const zoneRate = pc.zoneId && zoneById(pc.zoneId) ? ` · ${money(zoneById(pc.zoneId).hourlyRate)}/h` : '';
+  const rows = [
+    row('Zone', (pc.zoneName || '—') + zoneRate),
+    row('IP address', chip(pc.ip)),
+    row('MAC', chip(pc.mac)),
+    row('Computer', `${pc.hostname || '—'} · ${[pc.boardMaker, pc.boardProduct].filter(Boolean).join(' ') || 'board unknown'}`),
+  ];
+  if (online) rows.push(row('Lock screen', h('span', { class: 'dtl-live' },
+    h('span', { class: 'dot', style: `background:var(--${pc.runtime.clientAlive ? 'green' : 'red'})` }),
+    pc.runtime.clientAlive ? 'Running' : h('b', { style: 'color:var(--red)' }, 'Not running'))));
+  let m = modal(pc.name + ' — details', h('div', { class: 'dtl' },
+    h('div', { class: 'dtl-list' }, rows),
+    wolSection(pc, () => m.close())));
 }
 
 async function powerAction(btn, pc, action, m) {
@@ -538,29 +772,34 @@ const WOL_LABEL = {
   wifi: ['warn', 'Needs an Ethernet cable'], testing: ['info', 'Testing…'], unknown: ['', 'Unknown'],
 };
 
+const WOL_DOT = { ok: 'green', info: 'blue', warn: 'amber', bad: 'red', '': 'gray' };
+
 function wolSection(pc, closeParent) {
   const w = pc.wol;
   const [cls, label] = WOL_LABEL[w.status] || ['', w.status];
   const online = pc.runtime.online;
   const kids = [
-    h('div', { class: 'row' }, h('b', null, 'Remote power-on (Wake-on-LAN)'), h('span', { class: 'badge ' + cls }, label)),
+    h('div', { class: 'wol-head' },
+      h('h3', null, 'Remote power-on (Wake-on-LAN)'),
+      h('span', { class: 'grow' }),
+      h('span', { class: 'wol-pill ' + cls }, h('span', { class: 'dot', style: `background:var(--${WOL_DOT[cls] || 'gray'})` }), label)),
     w.status === 'testing' && w.stage ? h('p', null, w.stage) : null,
-    w.detail ? h('p', { class: 'small' }, w.detail) : null,
+    w.detail ? h('p', null, w.detail) : null,
   ];
   if (w.report && w.report.settings && w.report.settings.length) {
-    kids.push(h('details', null, h('summary', { class: 'small' }, 'Windows settings checked ' + dateTimeStr(w.checkedAt)),
+    kids.push(h('details', null, h('summary', null, 'Windows settings checked ' + dateTimeStr(w.checkedAt)),
       h('ul', { class: 'setlist' }, w.report.settings.map(st =>
         h('li', { class: st.ok ? '' : 'bad' }, `${st.name}: ${st.value}${st.fixed ? ' (fixed)' : ''}`, st.ok || !st.advice ? '' : h('div', { class: 'muted small' }, st.advice))))));
   }
   if ((w.status === 'bios_needed' || (w.status === 'windows_settings' && w.testedAt && new Date(w.testedAt).getFullYear() > 2000)) && w.guide) {
-    kids.push(h('div', { class: 'card', style: 'margin-top:8px;background:#fff7ed;border-color:#fed7aa' },
+    kids.push(h('div', { class: 'wol-guide' },
       h('b', null, `${pc.name}${w.guide.vendor ? ' (' + w.guide.vendor + ')' : ''} can't be turned on remotely.`),
       h('ol', { class: 'steps' }, w.guide.steps.map(s => h('li', null, s))),
       h('p', { class: 'muted small' }, w.guide.note)));
   }
   const btns = [];
   if (online) {
-    btns.push(h('button', { class: 'btn small', onclick: e => act(e.target, () => api('POST', `/api/pcs/${pc.id}/wol-check`, { fix: true }), 'Check finished') }, 'Check & fix Windows settings'));
+    btns.push(h('button', { class: 'btn small', onclick: e => act(e.target, () => api('POST', `/api/pcs/${pc.id}/wol-check`, { fix: true }), 'Check finished') }, ico(ICON.settings, 14), 'Check & fix Windows settings'));
     const force = w.status === 'windows_settings';
     btns.push(h('button', { class: 'btn small', disabled: !!pc.session || w.status === 'testing', onclick: async e => {
       const extra = force ? ' The Windows check reported problems, so the test may fail — but if the check is wrong, this shows it.' : '';
@@ -569,10 +808,10 @@ function wolSection(pc, closeParent) {
         await act(e.target, () => api('POST', `/api/pcs/${pc.id}/wol-test`, { force }), 'Test started — watch the PC tile');
         closeParent();
       } catch (err) { /* shown */ }
-    } }, force ? 'Test anyway' : 'Test Wake-on-LAN'));
+    } }, ico(ICON.power, 14), force ? 'Test anyway' : 'Test Wake-on-LAN'));
   }
-  if (btns.length) kids.push(h('div', { class: 'row' }, btns));
-  return h('div', null, kids);
+  if (btns.length) kids.push(h('div', { class: 'actions' }, btns));
+  return h('div', { class: 'wol' }, kids);
 }
 
 // Package / minutes picker used by Start and Add time.
@@ -615,15 +854,18 @@ function startModal(id) {
   const pc = pcById(id);
   const zone = zoneById(pc.zoneId);
   const rate = zone ? zone.hourlyRate : 0;
-  let mode = 'prepaid', choice = null;
+  let mode = 'open', choice = null;
   const priceEl = h('div', { class: 'price' });
-  const note = h('input', { type: 'text', placeholder: 'optional, e.g. customer name' });
+  const note = h('input', { type: 'text', maxlength: 500, placeholder: 'optional — e.g. tournament seat, or paid by a friend' });
+  const clientSel = clientSelectEl(0, '— no client —');
   const pickerBox = h('div');
   const startBtn = h('button', { class: 'btn primary' }, 'Start');
-  const modeBtns = [['prepaid', 'Prepaid (fixed time)'], ['open', 'Open (pay at the end)']].map(([k, l]) =>
-    h('button', { type: 'button', class: 'btn', onclick: () => { mode = k; draw(); } }, l));
+  const modeOrder = ['open', 'prepaid'];
+  const modeBtns = [['open', 'Open (pay at the end)'], ['prepaid', 'Prepaid (fixed time)']].map(([k, l]) =>
+    h('button', { type: 'button', onclick: () => { mode = k; draw(); } }, l));
+  const modeSeg = h('div', { class: 'segment wide', style: 'margin-bottom:14px' }, modeBtns);
   function draw() {
-    modeBtns.forEach((b, i) => b.classList.toggle('primary', ['prepaid', 'open'][i] === mode));
+    modeBtns.forEach((b, i) => b.classList.toggle('on', modeOrder[i] === mode));
     if (mode === 'prepaid') {
       pickerBox.replaceChildren(tariffPicker(pc, rate, c => { choice = c; priceEl.textContent = `${money(c.price)} for ${mins(c.minutesTotal)}`; startBtn.textContent = `Start — collect ${money(c.price)}`; }));
     } else {
@@ -634,10 +876,11 @@ function startModal(id) {
     }
   }
   const m = modal(`Start session — ${pc.name}`, h('div', null,
-    h('div', { class: 'row', style: 'margin-bottom:10px' }, modeBtns), pickerBox, priceEl, field('Note', note)),
+    modeSeg, pickerBox, priceEl,
+    field('Credit to client (optional)', clientSel), field('Note', note)),
   [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), startBtn]);
   startBtn.onclick = async () => {
-    const body = { mode, note: note.value };
+    const body = { mode, note: note.value, clientId: Number(clientSel.value) || 0 };
     if (mode === 'prepaid') {
       if (!choice || (!choice.packageId && !(choice.minutes > 0))) { toast('Choose a package or enter minutes.', 'error'); return; }
       body.packageId = choice.packageId; body.minutes = choice.minutes;
@@ -657,13 +900,15 @@ function startManyModal(ids) {
   const priceEl = h('div', { class: 'price' });
   const pickerBox = h('div');
   const startBtn = h('button', { class: 'btn primary', style: 'display:none' }, 'Start');
-  const modeBtns = [['prepaid', 'Prepaid (fixed time)'], ['open', 'Open (pay at the end)']].map(([k, l]) =>
-    h('button', { type: 'button', class: 'btn', onclick: () => { mode = k; draw(); } }, l));
+  const modeOrder = ['open', 'prepaid'];
+  const modeBtns = [['open', 'Open (pay at the end)'], ['prepaid', 'Prepaid (fixed time)']].map(([k, l]) =>
+    h('button', { type: 'button', onclick: () => { mode = k; draw(); } }, l));
+  const modeSeg = h('div', { class: 'segment wide', style: 'margin-bottom:10px' }, modeBtns);
   function draw() {
-    modeBtns.forEach((b, i) => b.classList.toggle('primary', ['prepaid', 'open'][i] === mode));
+    modeBtns.forEach((b, i) => b.classList.toggle('on', modeOrder[i] === mode));
     startBtn.style.display = mode ? '' : 'none';
     if (mode === null) {
-      pickerBox.replaceChildren(h('p', { class: 'muted' }, 'Choose Prepaid or Open above.'));
+      pickerBox.replaceChildren(h('p', { class: 'muted' }, 'Choose Open or Prepaid above.'));
       priceEl.textContent = '';
     } else if (mode === 'prepaid') {
       pickerBox.replaceChildren(tariffPicker(first, rate, c => { choice = c; priceEl.textContent = `${mins(c.minutesTotal)} on each PC`; startBtn.textContent = `Start on ${ids.length} PC(s)`; }));
@@ -676,8 +921,8 @@ function startManyModal(ids) {
   }
   const m = modal(`Start session on ${ids.length} PCs`, h('div', null,
     zonesInSel.size > 1 ? h('p', { class: 'muted small' }, 'Selected PCs are in different zones; each is billed at its own zone rate. A package applies only to PCs in its zone.') : null,
-    h('div', { class: 'muted small', style: 'margin-bottom:4px' }, 'Session type'),
-    h('div', { class: 'row', style: 'margin-bottom:10px' }, modeBtns), pickerBox, priceEl),
+    h('div', { class: 'muted small', style: 'margin-bottom:6px' }, 'Session type'),
+    modeSeg, pickerBox, priceEl),
   [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), startBtn]);
   startBtn.onclick = async () => {
     const body = { mode };
@@ -708,7 +953,9 @@ function timeModal(id) {
   let choice = null;
   const priceEl = h('div', { class: 'price' });
   const btn = h('button', { class: 'btn primary' }, 'Add time');
+  const left = s.status === 'paused' ? 'paused' : `${mins(s.remainingSec)} left now`;
   const m = modal(`Add time — ${pc.name}`, h('div', null,
+    h('p', { class: 'muted small', style: 'margin:0 0 12px' }, left),
     tariffPicker(pc, s.ratePerHour, c => { choice = c; priceEl.textContent = `+${mins(c.minutesTotal)} for ${money(c.price)}`; btn.textContent = `Add — collect ${money(c.price)}`; }),
     priceEl), [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), btn]);
   btn.onclick = async () => {
@@ -814,8 +1061,15 @@ function moveModal(id) {
 function messageModal(id) {
   const pc = id ? pcById(id) : null;
   const text = h('textarea', { rows: 3, maxlength: 500, placeholder: 'e.g. 10 minutes until closing' });
+  const quicks = ['Your time is almost up — come to the front desk to add more.', 'Please come to the front desk.', 'Please lower the volume.', 'We close in 15 minutes.'];
+  const chips = h('div', { class: 'row', style: 'margin-top:8px;gap:6px' },
+    quicks.map(q => h('button', { type: 'button', class: 'btn small', onclick: () => { text.value = q; } }, q.length > 26 ? q.slice(0, 24) + '…' : q)));
+  const body = h('div', null,
+    field('Text shown on screen', text),
+    h('div', { class: 'muted small', style: 'margin-bottom:2px' }, 'Quick messages'),
+    chips);
   const btn = h('button', { class: 'btn primary' }, 'Send');
-  const m = modal(pc ? `Message to ${pc.name}` : 'Message to all online PCs', field('Text shown on screen', text), [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), btn]);
+  const m = modal(pc ? `Message to ${pc.name}` : 'Message to all online PCs', body, [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), btn]);
   btn.onclick = async () => {
     try {
       if (pc) await act(btn, () => api('POST', `/api/pcs/${pc.id}/message`, { text: text.value }), 'Message sent');
@@ -883,9 +1137,14 @@ function screensBuildTiles() {
     const img = h('img', { class: 'screen-img', alt: '' });
     const waiting = h('div', { class: 'screen-wait' }, 'Waiting for image…');
     const badge = h('span', { class: 'screen-state st-' + pc.state }, STATE_LABEL[pc.state] || pc.state);
+    // Control (left) opens remote control; Watch (right) enlarges. Both stop the
+    // click from bubbling to the tile (whose own click also enlarges).
+    const canControl = pc.state !== 'offline' && !pc.runtime.locked;
+    const ctrlBtn = h('button', { class: 'btn small', title: pc.runtime.locked ? 'Unlock the PC to control it' : 'Take control', disabled: !canControl, onclick: e => { e.stopPropagation(); controlModal(pc.id, pc.name); } }, 'Control');
+    const watchBtn = h('button', { class: 'btn small', onclick: e => { e.stopPropagation(); openScreenModal(pc.id); } }, 'Watch');
     const tile = h('div', { class: 'screen-tile', title: 'Click to enlarge', onclick: () => openScreenModal(pc.id) },
       h('div', { class: 'screen-frame' }, img, waiting),
-      h('div', { class: 'screen-cap' }, h('span', { class: 'screen-name' }, pc.name), badge));
+      h('div', { class: 'screen-cap' }, h('span', { class: 'screen-name' }, pc.name), badge, ctrlBtn, watchBtn));
     sc.tiles.set(pc.id, { img, waiting });
     return tile;
   }));
@@ -919,12 +1178,19 @@ async function refreshScreen(id, img, waiting, timeoutMs) {
 
 function openScreenModal(id) {
   const pc = pcById(id);
-  if (!pc || !S.screens) return;
-  S.screens.focus = id;
-  screenPost(true); // ask the server for a sharper, faster frame on this PC
+  if (!pc) return;
+  // Opened from the PCs tab (no Screens grid running): drive its own capture
+  // lifecycle so it works inline without switching tabs.
+  const standalone = !S.screens;
+  const focusOn = () => {
+    if (standalone) api('POST', '/api/screens/state', { watching: true, focus: id }).catch(() => {});
+    else { S.screens.focus = id; screenPost(true); }
+  };
+  focusOn(); // ask the server for a sharper, faster frame on this PC
+  const hb = standalone ? setInterval(focusOn, 4000) : null; // keep capture alive (8s TTL)
   const img = h('img', { class: 'screen-big', alt: '' });
   const waiting = h('div', { class: 'screen-wait' }, 'Waiting for image…');
-  const snapBtn = h('button', { class: 'btn small', onclick: () => hdSnapshot(id, pc.name) }, '📷 HD snapshot');
+  const snapBtn = h('button', { class: 'btn small', onclick: () => hdSnapshot(id, pc.name) }, ico(ICON.camera, 14), ' HD snapshot');
   const bar = h('div', { class: 'screen-bigbar' }, snapBtn, controlControl(id, pc));
   const bigWrap = h('div', { class: 'screen-big-wrap' }, img, waiting);
   bar.append(fullscreenButton(bigWrap));
@@ -932,16 +1198,21 @@ function openScreenModal(id) {
   const m = modal(pc.name + ' — live screen', body);
   // Seed from the thumbnail immediately, then refresh at full rate.
   refreshScreen(id, img, waiting, SCREEN_FOCUS_MS * 3);
+  let stopped = false;
+  const stop = () => {
+    if (stopped) return; stopped = true;
+    clearInterval(timer);
+    if (hb) clearInterval(hb);
+    if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+    if (standalone) api('POST', '/api/screens/state', { watching: false, focus: 0 }).catch(() => {});
+    else if (S.screens) { S.screens.focus = 0; screenPost(true); }
+  };
   const timer = setInterval(() => {
     if (!document.body.contains(m.box)) { stop(); return; }
     refreshScreen(id, img, waiting, SCREEN_FOCUS_MS * 3);
   }, SCREEN_FOCUS_MS);
-  const stop = () => {
-    clearInterval(timer);
-    if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
-    if (S.screens) { S.screens.focus = 0; screenPost(true); }
-  };
-  S.screens.focusModal = m;
+  const baseClose = m.close; m.close = () => { stop(); baseClose(); };
+  if (!standalone) S.screens.focusModal = m;
 }
 
 // hdSnapshot asks the PC for one full-resolution frame and shows it frozen
@@ -1003,7 +1274,10 @@ function controlControl(id, pc) {
 const CONTROL_VK = {
   Backspace: 8, Tab: 9, Enter: 13, Escape: 27, Space: 32, CapsLock: 0x14,
   ShiftLeft: 0xA0, ShiftRight: 0xA1, ControlLeft: 0xA2, ControlRight: 0xA3,
-  AltLeft: 0xA4, AltRight: 0xA5, MetaLeft: 0x5B, MetaRight: 0x5C,
+  AltLeft: 0xA4, AltRight: 0xA5,
+  // The Windows key (Meta) is deliberately NOT forwarded: Windows swallows its
+  // key-up (the Start menu steals focus), so the key-up never reaches us and the
+  // PC would think Win is still held — turning every later key into a Win+shortcut.
   ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28,
   Home: 0x24, End: 0x23, PageUp: 0x21, PageDown: 0x22, Insert: 0x2D, Delete: 0x2E,
   Minus: 0xBD, Equal: 0xBB, BracketLeft: 0xDB, BracketRight: 0xDD, Backslash: 0xDC,
@@ -1058,6 +1332,15 @@ function controlModal(id, name) {
   document.addEventListener('keydown', onKey, true);
   document.addEventListener('keyup', onKey, true);
 
+  // If focus leaves this window mid-press (Alt+Tab, clicking away, the Windows
+  // key opening the Start menu), a key-up can be lost and leave a modifier stuck
+  // "down" on the PC. Releasing every modifier on blur prevents that.
+  const releaseMods = () => {
+    for (const vk of [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C]) buf.push({ kind: 'key', vk, keyDown: false });
+    sendNow();
+  };
+  window.addEventListener('blur', releaseMods);
+
   const flush = setInterval(sendNow, 50);
   const beat = setInterval(() => { if (running) api('POST', `/api/pcs/${id}/control`, { active: true }).catch(() => {}); }, 3000);
   const poll = setInterval(async () => {
@@ -1080,6 +1363,7 @@ function controlModal(id, name) {
     clearInterval(flush); clearInterval(beat); clearInterval(poll);
     document.removeEventListener('keydown', onKey, true);
     document.removeEventListener('keyup', onKey, true);
+    window.removeEventListener('blur', releaseMods);
     if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
     api('POST', `/api/pcs/${id}/control`, { active: false }).catch(() => {});
   };
@@ -1120,7 +1404,9 @@ function relParent(rel) { const i = rel.lastIndexOf('/'); return i < 0 ? '' : re
 function relLast(rel) { const i = rel.lastIndexOf('/'); return i < 0 ? rel : rel.slice(i + 1); }
 
 function renderFiles() {
-  S.files = { pcId: 0, localPath: '', localSel: null, pcRel: '', pcSel: null, timer: null };
+  // localSel: Map(path -> name) of chosen front-desk files; pcSel: Set(name) of
+  // chosen shared-folder files. Multi-select: click a file to toggle it.
+  S.files = { pcId: 0, localPath: '', localSel: new Map(), pcRel: '', pcSel: new Set(), timer: null };
   // Default to the first online PC.
   const online = (S.snap ? S.snap.pcs : []).filter(p => p.runtime && p.runtime.online);
   if (online.length) S.files.pcId = online[0].id;
@@ -1157,7 +1443,7 @@ function renderFiles() {
 
   setTimeout(() => paintActions(), 0); // ensure the action bar exists once attached
   return h('div', null,
-    h('p', { class: 'muted small' }, 'Copy files between this front-desk PC and a gaming PC. The gaming PC only shares one folder; this PC can browse anywhere. Local network only.'),
+    h('p', { class: 'muted small' }, 'Copy files between this front-desk PC and a gaming PC. Tick one or more files, then use the Send / Get buttons. The gaming PC only shares one folder; this PC can browse anywhere. Local network only.'),
     h('div', { class: 'fs-panes' }, local.el, pc.el),
     xfers);
 }
@@ -1177,15 +1463,23 @@ function localPane() {
 
   const paint = () => {
     const f = S.files; if (!f || !cur) return;
+    const files = cur.entries.filter(e => !e.isDir);
+    const allOn = files.length > 0 && files.every(e => f.localSel.has(e.path));
+    const selAll = files.length ? h('button', { class: 'btn small fs-selall', onclick: () => {
+      if (allOn) files.forEach(e => f.localSel.delete(e.path)); else files.forEach(e => f.localSel.set(e.path, e.name)); paint();
+    } }, allOn ? 'Clear' : 'Select all') : null;
     head.replaceChildren(
       h('b', null, 'This PC'),
-      h('button', { class: 'btn small', disabled: cur.atRoot, onclick: () => go(cur.parent || '') }, '↑ Up'),
-      h('span', { class: 'fs-path', title: cur.path || 'Drives' }, cur.path || 'Drives'));
+      h('button', { class: 'btn small', disabled: cur.atRoot, onclick: () => go(cur.parent || '') }, ico(ICON.up, 14), 'Up'),
+      h('span', { class: 'fs-path', title: cur.path || 'Drives' }, cur.path || 'Drives'),
+      selAll);
     const rows = cur.entries.map(e => {
-      if (e.isDir) return h('div', { class: 'fs-row dir', onclick: () => go(e.path) }, h('span', { class: 'fs-ic' }, '📁'), h('span', { class: 'fs-nm' }, e.name));
-      const on = f.localSel && f.localSel.path === e.path;
-      return h('div', { class: 'fs-row file' + (on ? ' sel' : ''), onclick: () => { f.localSel = { path: e.path, name: e.name }; paint(); } },
-        h('span', { class: 'fs-ic' }, '📄'), h('span', { class: 'fs-nm' }, e.name), h('span', { class: 'fs-sz' }, fmtBytes(e.size)));
+      if (e.isDir) return h('div', { class: 'fs-row dir', onclick: () => go(e.path) }, h('span', { class: 'fs-ic dir' }, ico(ICON.folder, 16)), h('span', { class: 'fs-nm' }, e.name));
+      const on = f.localSel.has(e.path);
+      const toggle = () => { if (f.localSel.has(e.path)) f.localSel.delete(e.path); else f.localSel.set(e.path, e.name); paint(); };
+      return h('div', { class: 'fs-row file' + (on ? ' sel' : ''), onclick: toggle },
+        h('input', { type: 'checkbox', class: 'fs-ck', checked: on, onclick: e2 => { e2.stopPropagation(); toggle(); } }),
+        h('span', { class: 'fs-ic' }, ico(ICON.file, 16)), h('span', { class: 'fs-nm' }, e.name), h('span', { class: 'fs-sz' }, fmtBytes(e.size)));
     });
     body.replaceChildren(cur.entries.length ? h('div', null, rows) : h('p', { class: 'muted' }, 'Empty folder.'));
     paintActions();
@@ -1195,7 +1489,7 @@ function localPane() {
     try { cur = await api('GET', `/api/fs/local?path=${encodeURIComponent(path)}`); }
     catch (e) { body.replaceChildren(h('p', { class: 'error' }, e.message)); return; }
     if (!S.files) return;
-    f.localPath = cur.path; f.localSel = null;
+    f.localPath = cur.path; f.localSel.clear();
     paint();
   };
   go('');
@@ -1210,30 +1504,37 @@ function pcPane() {
 
   const picker = () => {
     const online = (S.snap ? S.snap.pcs : []).filter(p => p.runtime && p.runtime.online);
-    const sel = h('select', { onchange: () => { S.files.pcId = Number(sel.value); S.files.pcRel = ''; S.files.pcSel = null; load(); } },
-      h('option', { value: 0 }, online.length ? '— choose a PC —' : 'No PCs online'),
-      online.map(p => h('option', { value: p.id, selected: p.id === S.files.pcId }, p.name)));
-    return sel;
+    const options = online.map(p => ({ value: p.id, label: p.name }));
+    return selectMenu(options, S.files.pcId, v => { S.files.pcId = Number(v); S.files.pcRel = ''; S.files.pcSel.clear(); load(); },
+      { placeholder: online.length ? 'Choose a PC' : 'No PCs online', small: true, scroll: true, empty: 'No PCs online' });
   };
   const paint = () => {
     const f = S.files; if (!f) return;
+    const files = cur ? cur.entries.filter(e => !e.isDir) : [];
+    const allOn = files.length > 0 && files.every(e => f.pcSel.has(e.name));
+    const selAll = files.length ? h('button', { class: 'btn small fs-selall', onclick: () => {
+      if (allOn) files.forEach(e => f.pcSel.delete(e.name)); else files.forEach(e => f.pcSel.add(e.name)); paint();
+    } }, allOn ? 'Clear' : 'Select all') : null;
     head.replaceChildren(
       picker(),
-      h('button', { class: 'btn small', disabled: !cur || !f.pcRel, onclick: () => nav(relParent(f.pcRel)) }, '↑ Up'),
-      h('span', { class: 'fs-path', title: f.pcRel || 'Shared' }, f.pcRel ? 'Shared/' + f.pcRel : 'Shared'));
+      h('button', { class: 'btn small', disabled: !cur || !f.pcRel, onclick: () => nav(relParent(f.pcRel)) }, ico(ICON.up, 14), 'Up'),
+      h('span', { class: 'fs-path', title: f.pcRel || 'Shared' }, f.pcRel ? 'Shared/' + f.pcRel : 'Shared'),
+      selAll);
     if (!cur) { body.replaceChildren(h('p', { class: 'muted' }, f.pcId ? 'Loading…' : 'Pick a PC to see its shared folder.')); paintActions(); return; }
     const rows = cur.entries.map(e => {
-      if (e.isDir) return h('div', { class: 'fs-row dir', onclick: () => nav(relJoin(f.pcRel, e.name)) }, h('span', { class: 'fs-ic' }, '📁'), h('span', { class: 'fs-nm' }, e.name));
-      const on = f.pcSel === e.name;
-      return h('div', { class: 'fs-row file' + (on ? ' sel' : ''), onclick: () => { f.pcSel = e.name; paint(); } },
-        h('span', { class: 'fs-ic' }, '📄'), h('span', { class: 'fs-nm' }, e.name), h('span', { class: 'fs-sz' }, fmtBytes(e.size)));
+      if (e.isDir) return h('div', { class: 'fs-row dir', onclick: () => nav(relJoin(f.pcRel, e.name)) }, h('span', { class: 'fs-ic dir' }, ico(ICON.folder, 16)), h('span', { class: 'fs-nm' }, e.name));
+      const on = f.pcSel.has(e.name);
+      const toggle = () => { if (f.pcSel.has(e.name)) f.pcSel.delete(e.name); else f.pcSel.add(e.name); paint(); };
+      return h('div', { class: 'fs-row file' + (on ? ' sel' : ''), onclick: toggle },
+        h('input', { type: 'checkbox', class: 'fs-ck', checked: on, onclick: e2 => { e2.stopPropagation(); toggle(); } }),
+        h('span', { class: 'fs-ic' }, ico(ICON.file, 16)), h('span', { class: 'fs-nm' }, e.name), h('span', { class: 'fs-sz' }, fmtBytes(e.size)));
     });
     body.replaceChildren(cur.entries.length ? h('div', null, rows) : h('p', { class: 'muted' }, 'This folder is empty. Files dropped here (or sent from the left) appear here.'));
     paintActions();
   };
   const nav = async (rel) => {
     const f = S.files; if (!f) return;
-    f.pcRel = rel; f.pcSel = null;
+    f.pcRel = rel; f.pcSel.clear();
     paint(); // show the new path immediately
     try { const r = await api('GET', `/api/fs/pc/${f.pcId}?rel=${encodeURIComponent(rel)}`); if (!S.files) return; cur = r; }
     catch (e) { cur = null; body.replaceChildren(h('p', { class: 'error' }, e.message)); return; }
@@ -1255,28 +1556,38 @@ function paintActions() {
     const panes = document.querySelector('.fs-panes');
     if (panes) panes.after(bar); else return;
   }
-  const canSend = !!(f.localSel && f.pcId);
-  const canGet = !!(f.pcSel && f.pcId && f.localPath);
-  const send = h('button', { class: 'btn primary', disabled: !canSend, onclick: e => doSend(e.target) },
-    f.localSel ? `Send “${f.localSel.name}” →` : 'Send → PC');
-  const get = h('button', { class: 'btn primary', disabled: !canGet, onclick: e => doGet(e.target) },
-    f.pcSel ? `← Get “${f.pcSel}”` : '← Get from PC');
+  const nLocal = f.localSel.size, nPc = f.pcSel.size;
+  const canSend = nLocal > 0 && !!f.pcId;
+  const canGet = nPc > 0 && !!f.pcId && f.localPath !== '';
+  const plural = n => n === 1 ? '1 file' : n + ' files';
+  const sendLabel = nLocal === 1 ? `Send “${[...f.localSel.values()][0]}”`
+    : (nLocal ? `Send ${plural(nLocal)}` : 'Send to PC');
+  const getLabel = nPc === 1 ? `Get “${[...f.pcSel][0]}”`
+    : (nPc ? `Get ${plural(nPc)}` : 'Get from PC');
+  const get = h('button', { class: 'btn primary', disabled: !canGet, onclick: e => doGet(e.target) }, ico(ICON.download, 15), getLabel);
+  const send = h('button', { class: 'btn primary', disabled: !canSend, onclick: e => doSend(e.target) }, sendLabel, ico(ICON.send, 15));
   const hint = !f.pcId ? 'Pick a PC on the right.'
-    : (!f.localSel && !f.pcSel ? 'Pick a file in either pane.'
-      : (f.pcSel && !f.localPath ? 'Open a folder on the left to receive the file.' : ''));
+    : (!nLocal && !nPc ? 'Tick one or more files in either pane.'
+      : (nPc && !f.localPath ? 'Open a folder on the left to receive the files.' : ''));
   bar.replaceChildren(get, send, hint ? h('span', { class: 'muted small' }, hint) : null);
 }
 
 async function doSend(btn) {
-  const f = S.files; if (!f || !f.localSel || !f.pcId) return;
-  await act(btn, () => api('POST', '/api/fs/send', { pcId: f.pcId, srcPath: f.localSel.path, destRel: f.pcRel }), 'Sending…')
-    .then(() => { if (S.files) { S.files.loadXfers(); setTimeout(() => S.files && S.files.refreshPC(), 400); } }).catch(() => {});
+  const f = S.files; if (!f || !f.localSel.size || !f.pcId) return;
+  const items = [...f.localSel.entries()]; // [path, name]
+  const pcId = f.pcId, destRel = f.pcRel;
+  await act(btn, async () => {
+    for (const [path] of items) await api('POST', '/api/fs/send', { pcId, srcPath: path, destRel });
+  }, 'Sending…').then(() => { if (S.files) { S.files.localSel.clear(); paintActions(); S.files.loadXfers(); setTimeout(() => S.files && S.files.refreshPC(), 400); } }).catch(() => {});
 }
 
 async function doGet(btn) {
-  const f = S.files; if (!f || !f.pcSel || !f.pcId || !f.localPath) return;
-  await act(btn, () => api('POST', '/api/fs/get', { pcId: f.pcId, srcRel: f.pcRel, name: f.pcSel, destDir: f.localPath }), 'Getting…')
-    .then(() => { if (S.files) { S.files.loadXfers(); setTimeout(() => S.files && S.files.refreshLocal(), 400); } }).catch(() => {});
+  const f = S.files; if (!f || !f.pcSel.size || !f.pcId || !f.localPath) return;
+  const names = [...f.pcSel];
+  const pcId = f.pcId, srcRel = f.pcRel, destDir = f.localPath;
+  await act(btn, async () => {
+    for (const name of names) await api('POST', '/api/fs/get', { pcId, srcRel, name, destDir });
+  }, 'Getting…').then(() => { if (S.files) { S.files.pcSel.clear(); paintActions(); S.files.loadXfers(); setTimeout(() => S.files && S.files.refreshLocal(), 400); } }).catch(() => {});
 }
 
 // ---------- Incoming-call prompts ----------
@@ -1444,6 +1755,12 @@ function bookingRow(b, reload) {
     if (b.status === 'started') actions.push(h('button', { class: 'btn small danger', onclick: async e => { if (await confirmBox('No-show', `Release ${b.who}'s PCs as a no-show? Their sessions end with no charge.`, 'Release', true)) act(e.target, () => api('POST', `/api/bookings/${b.id}/noshow`), 'Released').then(reload).catch(() => {}); } }, 'No-show'));
     actions.push(h('button', { class: 'btn small', onclick: async e => { if (await confirmBox('Cancel booking', `Cancel ${b.who}'s booking?`, 'Cancel booking', true)) act(e.target, () => api('POST', `/api/bookings/${b.id}/cancel`), 'Cancelled').then(reload).catch(() => {}); } }, 'Cancel'));
   }
+  // Delete removes the booking from the schedule entirely. A started booking's
+  // running sessions keep going; only the reservation record is removed.
+  const delMsg = b.status === 'started'
+    ? `Delete ${b.who}'s booking? The PCs keep their running sessions — only the reservation is removed. To stop the sessions, use Cancel instead.`
+    : `Delete ${b.who}'s booking? This removes it from the schedule for good.`;
+  actions.push(h('button', { class: 'btn small danger', onclick: async e => { if (await confirmBox('Delete booking', delMsg, 'Delete', true)) act(e.target, () => api('DELETE', `/api/bookings/${b.id}`), 'Booking deleted').then(reload).catch(() => {}); } }, 'Delete'));
   return h('tr', null,
     h('td', null, `${timeStr(b.startAt)}–${timeStr(b.endAt)}`),
     h('td', null, b.who, b.phone ? h('div', { class: 'muted small' }, b.phone) : null, b.kind === 'group' ? h('div', { class: 'muted small' }, `group · ${b.members} member(s)`) : null, b.note ? h('div', { class: 'muted small' }, b.note) : null),
@@ -1603,30 +1920,83 @@ async function bookingModal(existing, reload, preset) {
 
 // ---------- Clients & groups ----------
 
+// showMemberPassword presents a one-time generated password. It's shown once and
+// only the hash is stored, so the operator must pass it on now (SMS later).
+function showMemberPassword(name, pw) {
+  const code = h('div', { class: 'pw-code' }, pw || '(none)');
+  const copy = h('button', { class: 'btn small', onclick: () => { if (navigator.clipboard) navigator.clipboard.writeText(pw).then(() => toast('Copied', 'ok'), () => {}); } }, 'Copy');
+  let m = modal('Member password — ' + name, h('div', null,
+    h('p', { class: 'muted small' }, `Give this password to ${name}. It is shown once and can't be recovered — if it's lost, use “Reset password”.`),
+    code,
+    h('div', { class: 'row', style: 'margin-top:8px' }, copy)),
+    [h('button', { class: 'btn primary', onclick: () => m.close() }, 'Done')]);
+}
+
+// clientSelectEl returns a themed client picker (members marked ★). It reads
+// like a <select>: `.value` is the chosen client id as a string, "0" for none.
+// The list is populated asynchronously.
+function clientSelectEl(selectedId, placeholder) {
+  wireDropdowns();
+  const ph = placeholder || '— no client —';
+  let clients = [], selId = selectedId || 0;
+  const label = id => { const c = clients.find(x => x.id === id); return c ? `${c.name} · ${c.phone}` : ph; };
+
+  const valSpan = h('span', { class: 'val' }, label(selId));
+  const trigger = h('button', { type: 'button', class: 'btn selbtn block' },
+    h('span', { class: 'selval' }, valSpan), h('span', { class: 'caret' }, ico(ICON.chevron, 15)));
+  const menu = h('div', { class: 'menu scroll' });
+  const dd = h('span', { class: 'dd block' }, trigger, menu);
+  Object.defineProperty(dd, 'value', { get: () => String(selId) });
+
+  const pick = id => { selId = id; valSpan.textContent = label(id); build(); };
+  const build = () => menu.replaceChildren(
+    menuItem(ph, () => pick(0), { check: true, sel: selId === 0 }),
+    ...clients.map(c => menuItem(`${c.name} · ${c.phone}`, () => pick(c.id), { check: true, sel: c.id === selId, hint: c.authorized ? '★' : null })));
+
+  trigger.addEventListener('click', ev => { ev.stopPropagation(); toggleDD(dd); });
+  menu.addEventListener('click', ev => ev.stopPropagation());
+  build();
+  api('GET', '/api/clients').then(list => { clients = list; valSpan.textContent = label(selId); build(); }).catch(() => {});
+  return dd;
+}
+
 function renderClients() {
+  const view = S.clientView || 'basic';
+  if (view === 'auth') return clientsCard(null, 'auth');
   const wrap = h('div');
   const groups = groupsCard();
-  wrap.append(clientsCard(() => groups.reload()), groups.el);
+  wrap.append(clientsCard(() => groups.reload(), 'basic'), groups.el);
   return wrap;
 }
 
-function clientsCard(onChange) {
+// clientsCard renders the clients table. mode 'basic' shows non-members plus the
+// add form; 'auth' shows only members (no add form).
+function clientsCard(onChange, mode) {
+  mode = mode || 'basic';
   const box = h('div', null, h('p', { class: 'muted' }, 'Loading…'));
   const search = h('input', { type: 'text', placeholder: 'Search by name or phone…', style: 'flex:1' });
   let timer = null;
   const load = async () => {
     try {
-      const list = await api('GET', `/api/clients?q=${encodeURIComponent(search.value.trim())}`);
+      const all = await api('GET', `/api/clients?q=${encodeURIComponent(search.value.trim())}`);
+      const list = all.filter(c => mode === 'auth' ? c.authorized : !c.authorized);
       box.replaceChildren(list.length ? h('div', { style: 'overflow-x:auto' }, h('table', null,
-        h('tr', null, ['Name', 'Phone', 'Note', ''].map(t => h('th', null, t))),
+        h('tr', null, ['Name', 'Phone', 'Note', 'Member', 'Hours', ''].map(t => h('th', null, t))),
         list.map(c => {
           const name = h('input', { type: 'text', value: c.name, style: 'width:140px' });
           const phone = h('input', { type: 'text', value: c.phone, style: 'width:120px' });
           const note = h('input', { type: 'text', value: c.note || '', placeholder: 'e.g. VIP, banned', style: 'width:160px' });
           const save = h('button', { class: 'btn small primary', onclick: e => act(e.target, () => api('PUT', `/api/clients/${c.id}`, { name: name.value, phone: phone.value, note: note.value }), 'Saved').catch(() => {}) }, 'Save');
           const del = h('button', { class: 'btn small danger', onclick: async e => { if (await confirmBox('Delete client', `Delete ${c.name}? Booking history is kept.`, 'Delete', true)) { await act(e.target, () => api('DELETE', `/api/clients/${c.id}`), 'Deleted').then(() => { load(); onChange && onChange(); }).catch(() => {}); } } }, 'Delete');
-          return h('tr', null, h('td', null, name), h('td', null, phone), h('td', null, note), h('td', null, save, ' ', del));
-        }))) : h('p', { class: 'muted' }, search.value.trim() ? 'No clients match.' : 'No clients yet.'));
+          const memberCell = c.authorized
+            ? h('span', null, h('span', { class: 'badge ok' }, 'Member'), c.registeredAt ? h('div', { class: 'muted small' }, 'since ' + dateTimeStr(c.registeredAt)) : null, h('div', { class: 'muted small' }, 'Ratings: not available yet'))
+            : h('span', { class: 'muted small' }, 'Basic');
+          const authBtns = c.authorized
+            ? [h('button', { class: 'btn small', onclick: e => act(e.target, () => api('POST', `/api/clients/${c.id}/reset-password`)).then(r => showMemberPassword(c.name, r.password)).catch(() => {}) }, 'Reset password'),
+               h('button', { class: 'btn small danger', onclick: async e => { if (await confirmBox('Remove membership', `Remove ${c.name}'s member login? Their played hours are kept.`, 'Remove', true)) { await act(e.target, () => api('POST', `/api/clients/${c.id}/deauthorize`), 'Membership removed').then(load).catch(() => {}); } } }, 'Remove')]
+            : [h('button', { class: 'btn small primary', onclick: e => act(e.target, () => api('POST', `/api/clients/${c.id}/authorize`)).then(r => { showMemberPassword(c.name, r.password); load(); }).catch(() => {}) }, 'Authorize')];
+          return h('tr', null, h('td', null, name), h('td', null, phone), h('td', null, note), h('td', null, memberCell), h('td', null, mins(Math.floor((c.hoursSeconds || 0) / 60))), h('td', null, h('div', { class: 'row', style: 'gap:4px' }, save, del, ...authBtns)));
+        }))) : h('p', { class: 'muted' }, search.value.trim() ? 'No clients match.' : (mode === 'auth' ? 'No members yet. Authorize a client in Basic clients.' : 'No clients yet.')));
     } catch (e) { box.replaceChildren(h('p', { class: 'error' }, e.message)); }
   };
   search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 250); });
@@ -1640,8 +2010,14 @@ function clientsCard(onChange) {
     if (!nName.value.trim() || !nPhone.value.trim()) { toast('Name and phone are required.', 'error'); return; }
     await act(add, () => api('POST', '/api/clients', { name: nName.value, phone: nPhone.value, note: nNote.value }), 'Client added').then(() => { nName.value = nPhone.value = nNote.value = ''; load(); onChange && onChange(); }).catch(() => {});
   };
-  return h('div', { class: 'card' }, h('h2', null, 'Clients'),
-    h('p', { class: 'muted small' }, 'Name and phone are both required. The phone number must be a valid Turkmen number and is unique (used to recognise callers); names may repeat.'),
+  if (mode === 'auth') {
+    return h('div', { class: 'card' }, h('h2', null, 'Authorized clients'),
+      h('p', { class: 'muted small' }, 'Members can log into the mobile app with their phone number + password. Hours are counted automatically; ratings arrive with the app phase.'),
+      h('div', { class: 'row', style: 'margin-bottom:10px' }, search),
+      box);
+  }
+  return h('div', { class: 'card' }, h('h2', null, 'Basic clients'),
+    h('p', { class: 'muted small' }, 'Contacts for bookings and caller matching. Phone must be a valid Turkmen number and is unique; names may repeat. Authorize a client to make them a member.'),
     h('div', { class: 'row', style: 'margin-bottom:10px' }, search),
     box,
     h('h3', null, 'Add a client'),
@@ -1837,7 +2213,7 @@ function renderSettings() {
   const wrap = h('div');
   wrap.append(accountCard());
   if (!isOwner()) return wrap;
-  wrap.append(clubCard(), dataCard(), installCard(), zonesCard(), packagesCard(), pcsCard(), staffCard(), simulateCallCard());
+  wrap.append(clubCard(), appearanceCard(), dataCard(), installCard(), zonesCard(), packagesCard(), pcsCard(), staffCard(), simulateCallCard());
   return wrap;
 }
 
@@ -1922,6 +2298,56 @@ function clubCard() {
     h('label', { class: 'check' }, autofix, 'Let PCs fix their Wake-on-LAN settings in Windows automatically'),
     h('label', { class: 'check' }, reqShift, 'Require an open shift before taking money'),
     h('div', { class: 'row' }, btn, h('button', { class: 'btn', onclick: e => act(e.target, () => api('POST', '/api/backup'), r => `Backup written: ${r.path}`).catch(() => {}) }, 'Back up database now')));
+}
+
+// Upload a raw image to an appearance slot (desktop | lock_bg).
+async function uploadAppearance(kind, file) {
+  const res = await fetch(`/api/settings/appearance/${kind}`, {
+    method: 'PUT', credentials: 'same-origin',
+    headers: { 'X-NextGaming': '1', 'Content-Type': file.type || 'application/octet-stream' }, body: file,
+  });
+  let data = null; try { data = await res.json(); } catch (e) { /* empty */ }
+  if (!res.ok) throw new Error((data && data.error) || `Error ${res.status}`);
+  return data;
+}
+
+// Build a full settings PUT body from the current snapshot plus overrides.
+function settingsBody(st, over) {
+  return Object.assign({
+    clubName: st.clubName, currency: st.currency, graceSeconds: st.graceSeconds, minChargeMinutes: st.minChargeMinutes,
+    warnMinutes: st.warnMinutes || [], autoFixWol: st.autoFixWol, requireShift: st.requireShift, namePosition: st.namePosition || 'center',
+  }, over || {});
+}
+
+function appearanceCard() {
+  const st = S.snap.settings;
+  const slot = (kind, label, hint) => {
+    const ver = kind === 'desktop' ? st.desktopWallpaperVer : st.lockScreenVer;
+    const img = h('img', { class: 'wp-prev', alt: '' });
+    const empty = h('div', { class: 'wp-empty' }, 'No image set');
+    if (ver > 0) { img.src = `/api/settings/appearance/${kind}?t=${ver}`; empty.style.display = 'none'; img.onerror = () => { img.style.display = 'none'; empty.style.display = 'flex'; }; }
+    else img.style.display = 'none';
+    const file = h('input', { type: 'file', accept: 'image/png,image/jpeg', style: 'display:none' });
+    const up = h('button', { class: 'btn small' }, ver > 0 ? 'Replace image' : 'Upload image');
+    up.onclick = () => file.click();
+    file.onchange = () => { if (file.files[0]) act(up, () => uploadAppearance(kind, file.files[0]), 'Image sent to the PCs').catch(() => {}); };
+    const rm = ver > 0 ? h('button', { class: 'btn small danger', onclick: e => act(e.target, () => api('DELETE', `/api/settings/appearance/${kind}`), 'Image removed').catch(() => {}) }, 'Remove') : null;
+    return h('div', { class: 'wp-item' },
+      h('div', { class: 'wp-prevwrap' }, img, empty),
+      h('div', { class: 'wp-meta' }, h('b', null, label), hint ? h('div', { class: 'muted small' }, hint) : null,
+        h('div', { class: 'row', style: 'margin-top:8px' }, up, rm), file));
+  };
+  const pos = selectMenu(
+    [{ value: 'center', label: 'Center' }, { value: 'top-left', label: 'Top-left' }],
+    st.namePosition || 'center',
+    v => api('PUT', '/api/settings', settingsBody(st, { namePosition: v })).then(() => toast('Lock-screen name position saved', 'ok')).catch(e => toast(e.message, 'error')),
+    { label: '' });
+  return h('div', { class: 'card' }, h('h2', null, 'Appearance on the gaming PCs'),
+    h('p', { class: 'muted small' }, 'PNG or JPEG, up to 6 MB. Images are pushed to every PC and take effect within a few seconds — the lock-screen image is dimmed slightly so the text stays readable.'),
+    h('div', { class: 'wp-grid' },
+      slot('desktop', 'Desktop wallpaper', 'The Windows desktop background each player sees.'),
+      slot('lock_bg', 'Lock-screen background', 'Behind the club name and timer on the lock screen.')),
+    h('div', { class: 'field', style: 'max-width:240px;margin-top:14px' }, h('span', { class: 'fl' }, 'PC name on the lock screen'), pos));
 }
 
 function installCard() {

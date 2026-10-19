@@ -187,6 +187,7 @@ func (h *Hub) serve(ctx context.Context, raw net.Conn) {
 		return
 	}
 	h.srv.agentConnected(pc.ID)
+	go h.srv.sendAssets(pc.ID, hello.DesktopWallpaperVer, hello.LockScreenVer)
 
 	for {
 		raw.SetReadDeadline(time.Now().Add(OfflineAfter + 5*time.Second))

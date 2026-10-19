@@ -54,6 +54,17 @@ Always run both `go vet ./...` and `GOOS=windows go vet ./...`: many files are `
   `clients.phone_key`. The panel (`web/app.js`: `updateCallBar`, `bookingModal`)
   turns a prompt into a pre-filled booking. Never expose in any online build. Docs:
   `docs/incoming-call-booking.md`.
+- **Clients & members**: `clients` holds the booking contact (name + unique phone).
+  A client becomes an **authorized member** when a `client_accounts` row is added
+  (migration v7): a system-generated one-time password, stored only as a
+  PBKDF2-HMAC-SHA256 hash (`internal/core/password.go`, stdlib — no bcrypt dep),
+  plus `registered_at/by`. Ops in `internal/server/clients.go`:
+  `AuthorizeClient` / `ResetMemberPassword` return the plain password ONCE (SMS
+  later; shown on screen now), `DeauthorizeClient` removes membership. "Hours
+  played" is derived, never stored — `store.ClientHoursSeconds` sums active
+  seconds of sessions whose `customer_id` is that client. Ratings are deferred
+  (shown as "not available yet"). All member data is local for now; the phone is
+  the eventual national/app login id.
 - **Admin panel**: `internal/server/web`, plain JS, no build step, embedded with `go:embed`.
   JSON API under `/api`, snapshots over SSE at `/api/events`. State-changing requests need
   the header `X-NextGaming: 1` (CSRF guard).
@@ -69,7 +80,10 @@ Always run both `go vet ./...` and `GOOS=windows go vet ./...`: many files are `
 5. Pure billing rules live in `internal/core` with unit tests. Keep them free of I/O.
 6. The lock screen must fail closed: when in doubt, lock.
 7. Paused time is never billed; a player's "End session" pauses (CheckoutRequested) instead of ending.
-8. `customer_id` on sessions is reserved for customer accounts (not used in v1).
+8. `customer_id` on sessions holds the attached **client** id (0/NULL = none). It
+   credits that client's played hours; it's set at start (`StartRequest.ClientID`,
+   or a single-client booking) and can be changed on a running session
+   (`SetSessionClient`). `UpdateSession` must keep writing it.
 
 ## Where to add things
 

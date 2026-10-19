@@ -258,9 +258,30 @@ func (s *Store) migrate() error {
 		if _, err := s.DB.Exec("PRAGMA user_version = 6"); err != nil {
 			return err
 		}
+		v = 6
+	}
+	if v < 7 {
+		// v7: authorized members. A client becomes a member when an account row
+		// is added (password hash + registration metadata). One row per client.
+		if _, err := s.DB.Exec(schemaV7); err != nil {
+			return err
+		}
+		if _, err := s.DB.Exec("PRAGMA user_version = 7"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
+
+const schemaV7 = `
+CREATE TABLE IF NOT EXISTS client_accounts (
+	client_id     INTEGER PRIMARY KEY,
+	password_hash TEXT NOT NULL,
+	status        TEXT NOT NULL DEFAULT 'active',
+	registered_at INTEGER NOT NULL,
+	registered_by INTEGER NOT NULL DEFAULT 0
+);
+`
 
 // backfillPhoneKeys fills phone_key for existing clients from their stored
 // phone. A number that can't be normalised is left with an empty key (it simply
@@ -916,9 +937,9 @@ func InsertSession(q Q, s *core.Session) error {
 // UpdateSession writes every mutable field of a session.
 func UpdateSession(q Q, s *core.Session) error {
 	_, err := q.Exec(`UPDATE sessions SET pc_id=?,mode=?,status=?,ended_at=?,paused_at=?,paused_seconds=?,paid_seconds=?,
-		rate_per_hour=?,tariff_name=?,paid=?,ended_by=?,end_reason=?,note=?,checkout_requested=? WHERE id=?`,
+		rate_per_hour=?,tariff_name=?,paid=?,ended_by=?,customer_id=?,end_reason=?,note=?,checkout_requested=? WHERE id=?`,
 		s.PCID, string(s.Mode), string(s.Status), tsp(s.EndedAt), tsp(s.PausedAt), s.PausedSeconds, s.PaidSeconds,
-		s.RatePerHour, s.TariffName, s.Paid, s.EndedBy, s.EndReason, s.Note, b2i(s.CheckoutRequested), s.ID)
+		s.RatePerHour, s.TariffName, s.Paid, s.EndedBy, s.CustomerID, s.EndReason, s.Note, b2i(s.CheckoutRequested), s.ID)
 	return err
 }
 
